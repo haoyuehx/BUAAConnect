@@ -220,6 +220,10 @@ func (c *Client) parseResources(resources string) error {
 		return errors.New("no Dns data attribute found")
 	}
 
+	// Static DNS mappings from the server are real IP resources too. When the
+	// domain resource mode is enabled, route them through the TUN interface and
+	// register them so matchStaticResource accepts traffic to these addresses.
+	staticDNSIPs := make(map[string]struct{})
 	for _, dnsStr := range strings.Split(dnsListStr.Value, ";") {
 		if dnsStr == "" {
 			continue
@@ -235,8 +239,24 @@ func (c *Client) parseResources(resources string) error {
 			continue
 		}
 
-		c.dnsResource[dnsParts[1]] = append(c.dnsResource[dnsParts[1]], ip.IPAddr().IP)
+		netIP := ip.IPAddr().IP
+		c.dnsResource[dnsParts[1]] = append(c.dnsResource[dnsParts[1]], netIP)
 		log.DebugPrintf("Add DNS rule: %s -> %s", dnsParts[1], dnsParts[2])
+
+		if c.useDomainResource {
+			key := netIP.String()
+			if _, seen := staticDNSIPs[key]; !seen {
+				staticDNSIPs[key] = struct{}{}
+				ipSetBuilder.Add(ip)
+				c.ipResources = append(c.ipResources, client.IPResource{
+					IPMin:    netIP,
+					IPMax:    append(net.IP(nil), netIP...),
+					PortMin:  1,
+					PortMax:  65535,
+					Protocol: "all",
+				})
+			}
+		}
 	}
 
 	c.ipSet, err = ipSetBuilder.IPSet()

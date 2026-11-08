@@ -1,7 +1,9 @@
 package easyconnect
 
 import (
+	"context"
 	"crypto/tls"
+	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -221,4 +223,55 @@ func newTestUnderlay(t *testing.T, options underlay.Options) *underlay.Dialer {
 	}
 	t.Cleanup(func() { _ = dialer.Close() })
 	return dialer
+}
+
+type recordingPinDialer struct {
+	pinAddress string
+	pinCalls   int
+}
+
+func (d *recordingPinDialer) DialContext(context.Context, string, string) (net.Conn, error) {
+	return nil, errors.New("dial blocked by test")
+}
+
+func (d *recordingPinDialer) ExcludeIP(net.IP) {}
+
+func (d *recordingPinDialer) PinInterface(_ context.Context, address string) (string, error) {
+	d.pinCalls++
+	d.pinAddress = address
+	return "eth0", nil
+}
+
+func TestSetupPinsUnderlayInterfaceBeforeAnyRequest(t *testing.T) {
+	dialer := &recordingPinDialer{}
+	client := NewClient(Options{Server: "vpn.example.com:443", UnderlayDialer: dialer})
+	t.Cleanup(client.Close)
+
+	// Setup fails at the first control-plane request (the test dialer refuses
+	// to connect), but pinning must already have happened before that.
+	if err := client.Setup(); err == nil {
+		t.Fatal("Setup() error = nil, want control-plane dial error")
+	}
+	if dialer.pinCalls != 1 {
+		t.Fatalf("PinInterface calls = %d, want 1", dialer.pinCalls)
+	}
+	if dialer.pinAddress != "vpn.example.com:443" {
+		t.Fatalf("PinInterface address = %q, want %q", dialer.pinAddress, "vpn.example.com:443")
+	}
+}
+
+func TestSetupAddsDefaultPortToProbeAddress(t *testing.T) {
+	client := NewClient(Options{Server: "vpn.example.com"})
+	t.Cleanup(client.Close)
+	if got := client.underlayProbeAddress(); got != "vpn.example.com:443" {
+		t.Fatalf("underlayProbeAddress() = %q, want %q", got, "vpn.example.com:443")
+	}
+	client.server = "vpn.example.com:8443"
+	if got := client.underlayProbeAddress(); got != "vpn.example.com:8443" {
+		t.Fatalf("underlayProbeAddress() = %q, want %q", got, "vpn.example.com:8443")
+	}
+	client.server = ""
+	if got := client.underlayProbeAddress(); got != "" {
+		t.Fatalf("underlayProbeAddress() = %q, want empty", got)
+	}
 }

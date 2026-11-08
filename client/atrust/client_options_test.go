@@ -3,6 +3,7 @@ package atrust
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mythologyli/zju-connect/underlay"
 )
@@ -32,6 +33,60 @@ func TestNewClientMapsOptions(t *testing.T) {
 	}
 	if c.underlayDialer != dialer || c.tlsKeyLogWriter != &keyLogWriter {
 		t.Fatal("transport dependencies were not mapped")
+	}
+}
+
+func TestNewClientMapsReconnectOptions(t *testing.T) {
+	c := NewClient(ClientOptions{
+		MaxReconnect:   2,
+		ReconnectDelay: 750 * time.Millisecond,
+	})
+	t.Cleanup(c.Close)
+
+	if c.maxReconnect != 2 {
+		t.Fatalf("maxReconnect = %d, want 2", c.maxReconnect)
+	}
+	if c.reconnectDelay != 750*time.Millisecond {
+		t.Fatalf("reconnectDelay = %s, want 750ms", c.reconnectDelay)
+	}
+}
+
+func TestSetupOptionsOverrideReconnectPolicy(t *testing.T) {
+	c := NewClient(ClientOptions{MaxReconnect: 2, ReconnectDelay: time.Second})
+	t.Cleanup(c.Close)
+
+	// Zero values keep the ClientOptions policy.
+	c.applyReconnectOptions(SetupOptions{})
+	if c.maxReconnect != 2 || c.reconnectDelay != time.Second {
+		t.Fatalf("policy after empty SetupOptions = (%d, %s), want (2, 1s)", c.maxReconnect, c.reconnectDelay)
+	}
+
+	c.applyReconnectOptions(SetupOptions{MaxReconnect: 7, ReconnectDelay: 100 * time.Millisecond})
+	if c.maxReconnect != 7 {
+		t.Fatalf("maxReconnect = %d, want 7", c.maxReconnect)
+	}
+	if c.reconnectDelay != 100*time.Millisecond {
+		t.Fatalf("reconnectDelay = %s, want 100ms", c.reconnectDelay)
+	}
+
+	// Negative values are ignored as well.
+	c.applyReconnectOptions(SetupOptions{MaxReconnect: -1, ReconnectDelay: -time.Second})
+	if c.maxReconnect != 7 || c.reconnectDelay != 100*time.Millisecond {
+		t.Fatalf("policy after negative SetupOptions = (%d, %s), want (7, 100ms)", c.maxReconnect, c.reconnectDelay)
+	}
+}
+
+func TestServerHostReturnsConfiguredServer(t *testing.T) {
+	c := NewClient(ClientOptions{})
+	t.Cleanup(c.Close)
+	c.serverAddress = "vpn.example.com:8443"
+	if got := c.ServerHost(); got != "vpn.example.com:8443" {
+		t.Fatalf("ServerHost() = %q, want %q", got, "vpn.example.com:8443")
+	}
+
+	var nilClient *Client
+	if got := nilClient.ServerHost(); got != "" {
+		t.Fatalf("nil ServerHost() = %q, want empty", got)
 	}
 }
 

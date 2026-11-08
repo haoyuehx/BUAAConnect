@@ -1,9 +1,10 @@
-//go:build !android
+//go:build linux
 
 package tun
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/netip"
@@ -14,6 +15,7 @@ import (
 	tun "github.com/mythologyli/sing-tun"
 	"github.com/mythologyli/zju-connect/client"
 	"github.com/mythologyli/zju-connect/internal/hook_func"
+	"github.com/mythologyli/zju-connect/internal/netownership"
 	"github.com/mythologyli/zju-connect/log"
 )
 
@@ -47,21 +49,96 @@ func (ep *Endpoint) Read(buf []byte) (int, error) {
 	return ep.ifce.Read(buf)
 }
 
+// AddRoute adds a route through the TUN interface. Routes successfully added
+// here are tracked for Cleanup, while pre-existing routes are left untouched.
 func (s *Stack) AddRoute(target string) error {
-	command := exec.Command("ip", "route", "add", target, "dev", s.endpoint.ifceName)
-	err := command.Run()
-	if err != nil {
-		return err
+	if s.routeManager == nil {
+		return errors.New("route manager is not initialized")
 	}
-
-	return nil
+	return s.routeManager.AddRoute(target)
 }
 
+// InterfaceName returns the name of the TUN interface.
+func (s *Stack) InterfaceName() string {
+	if s == nil || s.endpoint == nil {
+		return ""
+	}
+	return s.endpoint.ifceName
+}
+
+// ClientIP returns the virtual IP assigned to the TUN interface.
+func (s *Stack) ClientIP() net.IP {
+	if s == nil || s.endpoint == nil {
+		return nil
+	}
+	s.endpoint.configMu.RLock()
+	defer s.endpoint.configMu.RUnlock()
+	return append(net.IP(nil), s.endpoint.ip...)
+}
+
+// AddedRoutes returns the routes this process added through the TUN interface.
+func (s *Stack) AddedRoutes() []string {
+	if s == nil || s.routeManager == nil {
+		return nil
+	}
+	return s.routeManager.Routes()
+}
+
+// Cleanup reverts the system DNS configuration, removes only the routes this
+// process added, and closes the TUN device. It is idempotent and safe for
+// concurrent callers (for example the terminal hook and main).
+func (s *Stack) Cleanup() error {
+	if s == nil {
+		return nil
+	}
+	s.cleanupMu.Lock()
+	defer s.cleanupMu.Unlock()
+	if s.cleanupDone {
+		return s.cleanupErr
+	}
+
+	var errs []error
+	if s.dnsManager != nil {
+		if err := s.dnsManager.Revert(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if s.routeManager != nil {
+		if err := s.routeManager.Rollback(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if s.endpoint != nil && s.endpoint.ifce != nil {
+		if err := s.endpoint.ifce.Close(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+
+	s.cleanupErr = errors.Join(errs...)
+	s.cleanupDone = true
+	return s.cleanupErr
+}
+
+// NewStack keeps the historical constructor signature.
 func NewStack(vpnClient client.Client, dnsHijack, fakeIP bool, ipResources []client.IPResource) (*Stack, error) {
+	return NewStackWithOptions(vpnClient, Options{
+		DNSHijack:   dnsHijack,
+		FakeIP:      fakeIP,
+		IPResources: ipResources,
+	})
+}
+
+// NewStackWithOptions creates the Linux TUN stack, applies extra routes and
+// optional resolvectl split DNS, and registers cleanup with the terminal hook
+// handler. Callers that want to integrate the exit error with their own
+// shutdown path should select on Err().
+func NewStackWithOptions(vpnClient client.Client, opts Options) (*Stack, error) {
+	if vpnClient == nil {
+		return nil, errors.New("vpn client is required")
+	}
 	var err error
 	s := &Stack{}
-	s.ipResources = ipResources
-	s.fakeIP = fakeIP
+	s.fakeIP = opts.FakeIP
 	s.endpoint = &Endpoint{
 		client: vpnClient,
 	}
@@ -70,9 +147,25 @@ func NewStack(vpnClient client.Client, dnsHijack, fakeIP bool, ipResources []cli
 	if err != nil {
 		return nil, err
 	}
-	ipPrefix, _ := netip.ParsePrefix(s.endpoint.ip.String() + "/32")
-	tunName := "ZJU-Connect"
-	tunName = tun.CalculateInterfaceName(tunName)
+
+	resources := opts.IPResources
+	extraPrefixes := []string(nil)
+	if len(opts.ExtraRoutes) > 0 {
+		resources, extraPrefixes, err = netownership.MergeExtraRoutes(resources, nil, opts.ExtraRoutes, opts.ServerIPs)
+		if err != nil {
+			return nil, fmt.Errorf("merge extra routes: %w", err)
+		}
+	}
+	s.ipResources = resources
+
+	ipPrefix, err := netip.ParsePrefix(s.endpoint.ip.String() + "/32")
+	if err != nil {
+		return nil, fmt.Errorf("parse client IP %s: %w", s.endpoint.ip, err)
+	}
+	tunName := opts.TunName
+	if tunName == "" {
+		tunName = tun.CalculateInterfaceName(DefaultTunNamePrefix)
+	}
 
 	tunOptions := tun.Options{
 		Name: tunName,
@@ -81,7 +174,7 @@ func NewStack(vpnClient client.Client, dnsHijack, fakeIP bool, ipResources []cli
 			ipPrefix,
 		},
 	}
-	if dnsHijack {
+	if opts.DNSHijack {
 		tunOptions.AutoRoute = true
 		tunOptions.TableIndex = 1897
 	}
@@ -89,12 +182,42 @@ func NewStack(vpnClient client.Client, dnsHijack, fakeIP bool, ipResources []cli
 	if err != nil {
 		return nil, err
 	}
-	hook_func.RegisterTerminalFunc("Close Tun Device", func(ctx context.Context) error {
-		return ifce.Close()
-	})
 	s.endpoint.ifce = ifce
 	s.endpoint.ifceName = tunName
+	s.routeManager = netownership.NewRouteManager(tunName, opts.RouteRunner)
+	s.dnsManager = netownership.NewDNSManager(tunName, opts.SystemDNS, opts.DNSRunner)
+	hook_func.RegisterTerminalFunc("Cleanup TUN resources", func(ctx context.Context) error {
+		return s.Cleanup()
+	})
 	log.Printf("Interface Name: %s\n", tunName)
+
+	// Extra routes are explicitly requested; failures are reported but do not
+	// abort the connection. Only routes we actually add are tracked.
+	for _, prefix := range extraPrefixes {
+		log.Printf("Add extra route to %s", prefix)
+		if err := s.routeManager.AddRoute(prefix); err != nil {
+			log.Printf("Warning: failed to add extra route %s: %v", prefix, err)
+		}
+	}
+
+	if dnsManager := s.dnsManager; dnsManager.Mode() != netownership.DNSModeOff {
+		// Server-advertised suffixes are added as routing-only domains. The
+		// global "~." is only honoured when the user configured it explicitly.
+		var serverDomains []string
+		if domainResources, domainErr := vpnClient.DomainResources(); domainErr == nil {
+			for domain := range domainResources {
+				if netownership.NormalizeDNSDomain(domain) == "~." {
+					continue
+				}
+				serverDomains = append(serverDomains, domain)
+			}
+		}
+		domains := netownership.MergeDNSDomains(netownership.DefaultDNSDomains, serverDomains, opts.DNSDomains)
+		if err := dnsManager.Configure(s.endpoint.ip, domains); err != nil {
+			_ = s.Cleanup()
+			return nil, err
+		}
+	}
 
 	// We need this dialer to bind to device otherwise packets will not be sent via TUN
 	s.endpoint.tcpDialer = &net.Dialer{

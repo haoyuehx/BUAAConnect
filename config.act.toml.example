@@ -1,18 +1,33 @@
-# ACT VPN 初始配置，兼容性待实机验证。
-# 不要将包含个人凭据的配置提交到仓库。
+# BUAAConnect ACT profile configuration.
+# Do not commit files containing credentials to version control.
+
+profile = "act"
 protocol = "easyconnect"
 server_address = "vpn.act.buaa.edu.cn"
 server_port = 8443
 username = ""
-password = "" # 建议通过 ZJU_CONNECT_PASSWORD 环境变量提供
+# Prefer BUAA_CONNECT_PASSWORD or interactive prompt; do not commit plaintext.
+password = ""
+
 disable_zju_config = true
 skip_domain_resource = true
 remote_dns_server = "auto"
+
 socks_bind = "127.0.0.1:11080"
 http_bind = "127.0.0.1:11081"
-tun_mode = false
-add_route = false
-# 仅影响本程序接收的代理/转发流量，不会接管全机流量。
+tun_mode = true
+add_route = true
+tun_name = "buaa-act"
+extra_routes = []
+
+system_dns = "auto"
+state_dir = ""
+max_reconnect = 5
+reconnect_delay = 3
+
+# Only affects traffic received by this program; it does not take over all
+# system traffic unless TUN mode and routes are configured accordingly.
 proxy_all = true
-# 按需添加本人获授权服务器的转发，见 README。
+
+# Add authorized forwarding rules here.
 port_forwarding = []

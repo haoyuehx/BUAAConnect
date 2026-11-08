@@ -26,6 +26,9 @@ type L3Tunnel struct {
 	conntrackMgrs     map[string]*conntrackMgr
 	connect           func(context.Context, string, *conntrackMgr) (*l3TunnelConn, error)
 	reconnectInterval time.Duration
+	// maxReconnect bounds consecutive failed reconnect attempts; <= 0 keeps
+	// retrying forever.
+	maxReconnect int
 
 	vipMu   sync.Mutex
 	vipList []net.IP
@@ -43,6 +46,9 @@ type l3TunnelConnectCall struct {
 
 const (
 	defaultReconnectInterval = 5 * time.Second
+	// maxReconnectBackoff caps exponential reconnect backoff so a long outage
+	// cannot stall the tunnel for minutes.
+	maxReconnectBackoff = 30 * time.Second
 )
 
 func NewL3Tunnel(aTrustClient *Client) (*L3Tunnel, error) {
@@ -52,8 +58,12 @@ func NewL3Tunnel(aTrustClient *Client) (*L3Tunnel, error) {
 		connecting:        make(map[string]*l3TunnelConnectCall),
 		conntrackMgrs:     make(map[string]*conntrackMgr),
 		reconnectInterval: defaultReconnectInterval,
+		maxReconnect:      aTrustClient.maxReconnect,
 		dataChan:          make(chan []byte, 4096),
 		closeCh:           make(chan struct{}),
+	}
+	if aTrustClient.reconnectDelay > 0 {
+		t.reconnectInterval = aTrustClient.reconnectDelay
 	}
 	t.connect = func(ctx context.Context, addr string, conntrackMgr *conntrackMgr) (*l3TunnelConn, error) {
 		info := clientInfo{
@@ -288,23 +298,10 @@ func (t *L3Tunnel) startReconnect(nodeGroupID string) {
 }
 
 func (t *L3Tunnel) connectWithRetry(nodeGroupID string, call *l3TunnelConnectCall, immediate bool) {
-	interval := t.reconnectInterval
-	if interval <= 0 {
-		interval = defaultReconnectInterval
-	}
 	for attempt := 0; ; attempt++ {
 		if !immediate || attempt > 0 {
-			timer := time.NewTimer(interval)
-			select {
-			case <-timer.C:
-			case <-t.closeCh:
-				if !timer.Stop() {
-					select {
-					case <-timer.C:
-					default:
-					}
-				}
-				t.finishConnect(nodeGroupID, call, nil, net.ErrClosed)
+			if err := t.waitReconnect(attempt); err != nil {
+				t.finishConnect(nodeGroupID, call, nil, err)
 				return
 			}
 		}
@@ -314,7 +311,56 @@ func (t *L3Tunnel) connectWithRetry(nodeGroupID string, call *l3TunnelConnectCal
 			return
 		}
 		log.DebugPrintf("l3-tunnel connect attempt %d failed for group %s: %v", attempt+1, nodeGroupID, err)
+		if t.maxReconnect > 0 && attempt+1 >= t.maxReconnect {
+			gaveUpErr := fmt.Errorf("l3-tunnel reconnect for group %s failed after %d attempts: %w", nodeGroupID, attempt+1, err)
+			log.Printf("%v", gaveUpErr)
+			t.finishConnect(nodeGroupID, call, nil, gaveUpErr)
+			return
+		}
 	}
+}
+
+// waitReconnect sleeps before the given attempt (0 = first) using an
+// exponential backoff derived from reconnectInterval, or returns net.ErrClosed
+// when the tunnel is closing.
+func (t *L3Tunnel) waitReconnect(attempt int) error {
+	delay := t.reconnectDelay(attempt)
+	if delay <= 0 {
+		return nil
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return nil
+	case <-t.closeCh:
+		return net.ErrClosed
+	}
+}
+
+// reconnectDelay returns the backoff before the given attempt. The configured
+// interval is the base step; delays above maxReconnectBackoff are honoured as
+// configured instead of being shortened.
+func (t *L3Tunnel) reconnectDelay(attempt int) time.Duration {
+	base := t.reconnectInterval
+	if base <= 0 {
+		base = defaultReconnectInterval
+	}
+	if attempt < 0 {
+		attempt = 0
+	}
+	limit := maxReconnectBackoff
+	if base > limit {
+		limit = base
+	}
+	delay := base
+	for i := 0; i < attempt; i++ {
+		if delay >= limit/2 {
+			return limit
+		}
+		delay *= 2
+	}
+	return delay
 }
 
 func (t *L3Tunnel) finishConnect(nodeGroupID string, call *l3TunnelConnectCall, conn *l3TunnelConn, err error) {

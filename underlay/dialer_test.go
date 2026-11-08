@@ -324,3 +324,129 @@ func TestDialContextResolvesThroughConfiguredLocalDNSServer(t *testing.T) {
 	}
 	_ = conn.Close()
 }
+
+func TestVirtualUnderlayInterfaceNamesAreRejected(t *testing.T) {
+	virtualNames := []string{
+		// TUN devices created by BUAAConnect itself and other VPN clients.
+		"tun0", "tun", "tun9", "utun0", "utun3", "ZJU-Connect0", "zju-connect1",
+		// Clash/Meta/mihomo TUN stacks.
+		"Meta", "meta0", "mihomo", "mihomo0", "clash0", "clash-tun",
+		// BUAAConnect's own interface prefix.
+		"buaaconnect0", "buaa-school", "buaa-act",
+		// Case-insensitive matching and surrounding whitespace.
+		" TUN0 ", "UTUN2",
+	}
+	for _, name := range virtualNames {
+		if !isVirtualUnderlayInterfaceName(name) {
+			t.Errorf("isVirtualUnderlayInterfaceName(%q) = false, want true", name)
+		}
+		if usableInterface(name, nil) {
+			t.Errorf("usableInterface(%q) = true, want false", name)
+		}
+	}
+
+	physicalNames := []string{
+		"eth0", "eth1", "wlp4s0", "wlan0", "enp3s0", "en0", "tailscale0", "",
+	}
+	for _, name := range physicalNames {
+		if isVirtualUnderlayInterfaceName(name) {
+			t.Errorf("isVirtualUnderlayInterfaceName(%q) = true, want false", name)
+		}
+	}
+}
+
+func TestPinInterfaceReturnsManualInterface(t *testing.T) {
+	dialer, err := New(Options{InterfaceName: "manual-interface", AutoDetect: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	name, err := dialer.PinInterface(context.Background(), "vpn.example.com:443")
+	if err != nil {
+		t.Fatalf("PinInterface() error = %v", err)
+	}
+	if name != "manual-interface" {
+		t.Fatalf("PinInterface() = %q, want %q", name, "manual-interface")
+	}
+}
+
+func TestPinInterfaceLeavesUnboundDialerUnpinned(t *testing.T) {
+	dialer, err := New(Options{AutoDetect: false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	name, err := dialer.PinInterface(context.Background(), "vpn.example.com:443")
+	if err != nil {
+		t.Fatalf("PinInterface() error = %v", err)
+	}
+	if name != "" {
+		t.Fatalf("PinInterface() = %q, want empty", name)
+	}
+}
+
+func TestPinInterfaceResolvesAutoDetectedInterface(t *testing.T) {
+	originalFind := findDefaultInterface
+	t.Cleanup(func() { findDefaultInterface = originalFind })
+
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		t.Fatal(err)
+	}
+	interfaceName := ""
+	for _, iface := range interfaces {
+		if usableInterface(iface.Name, nil) {
+			interfaceName = iface.Name
+			break
+		}
+	}
+	if interfaceName == "" {
+		t.Skip("no usable network interface")
+	}
+	findDefaultInterface = func() string { return interfaceName }
+
+	dialer, err := New(Options{AutoDetect: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	name, err := dialer.PinInterface(context.Background(), "vpn.example.com:443")
+	if err != nil {
+		t.Fatalf("PinInterface() error = %v", err)
+	}
+	if name != interfaceName {
+		t.Fatalf("PinInterface() = %q, want %q", name, interfaceName)
+	}
+	if got := dialer.InterfaceName(); got != interfaceName {
+		t.Fatalf("InterfaceName() = %q, want %q", got, interfaceName)
+	}
+}
+
+func TestPinInterfaceHonoursCancelledContext(t *testing.T) {
+	dialer, err := New(Options{AutoDetect: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := dialer.PinInterface(ctx, "vpn.example.com:443"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("PinInterface() error = %v, want context.Canceled", err)
+	}
+}
+
+func TestInterfaceFlagsUsableRejectsPointToPoint(t *testing.T) {
+	tests := []struct {
+		name  string
+		flags net.Flags
+		want  bool
+	}{
+		{name: "up ethernet", flags: net.FlagUp | net.FlagBroadcast | net.FlagMulticast, want: true},
+		{name: "down", flags: net.FlagBroadcast, want: false},
+		{name: "loopback", flags: net.FlagUp | net.FlagLoopback, want: false},
+		{name: "point to point", flags: net.FlagUp | net.FlagPointToPoint, want: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := interfaceFlagsUsable(test.flags); got != test.want {
+				t.Fatalf("interfaceFlagsUsable(%v) = %t, want %t", test.flags, got, test.want)
+			}
+		})
+	}
+}

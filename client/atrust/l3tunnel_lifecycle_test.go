@@ -168,7 +168,7 @@ func TestTunnelAuthUsesContextDeadline(t *testing.T) {
 	}
 }
 
-func TestTunnelReconnectUsesFixedIntervalUntilSuccessAndSharesResult(t *testing.T) {
+func TestTunnelReconnectWaitsBetweenAttemptsUntilSuccessAndSharesResult(t *testing.T) {
 	client := newSessionTestClient()
 	client.BestNodes = map[string]string{"group": "node:443"}
 	tunnel := &L3Tunnel{
@@ -215,11 +215,151 @@ func TestTunnelReconnectUsesFixedIntervalUntilSuccessAndSharesResult(t *testing.
 	defer attemptTimesMu.Unlock()
 	for i := 1; i < len(attemptTimes); i++ {
 		elapsed := attemptTimes[i].Sub(attemptTimes[i-1])
-		if elapsed < 8*time.Millisecond || elapsed > 100*time.Millisecond {
-			t.Fatalf("retry delay %d = %s, want fixed 10ms interval", i, elapsed)
+		// The base interval is 10ms and the backoff doubles per attempt, so
+		// every gap must be at least the 10ms base and bounded by the test
+		// timeout (timing assertions stay loose to avoid scheduler flakes).
+		if elapsed < 8*time.Millisecond || elapsed > time.Second {
+			t.Fatalf("retry delay %d = %s, want >= 10ms backoff step", i, elapsed)
 		}
 	}
 	tunnel.Close()
+}
+
+func TestTunnelReconnectBacksOffExponentiallyAndCaps(t *testing.T) {
+	tunnel := &L3Tunnel{reconnectInterval: time.Second}
+	want := []time.Duration{
+		time.Second,
+		2 * time.Second,
+		4 * time.Second,
+		8 * time.Second,
+		16 * time.Second,
+		30 * time.Second,
+		30 * time.Second,
+	}
+	for attempt, expected := range want {
+		if got := tunnel.reconnectDelay(attempt); got != expected {
+			t.Fatalf("reconnectDelay(%d) = %s, want %s", attempt, got, expected)
+		}
+	}
+
+	// Zero values fall back to the default interval.
+	if got := (&L3Tunnel{}).reconnectDelay(0); got != defaultReconnectInterval {
+		t.Fatalf("default reconnectDelay(0) = %s, want %s", got, defaultReconnectInterval)
+	}
+
+	// A delay above the cap is honoured as configured and never shortened.
+	slow := &L3Tunnel{reconnectInterval: time.Hour}
+	if got := slow.reconnectDelay(3); got != time.Hour {
+		t.Fatalf("slow reconnectDelay(3) = %s, want %s", got, time.Hour)
+	}
+}
+
+func TestTunnelReconnectGivesUpAfterMaxReconnect(t *testing.T) {
+	client := newSessionTestClient()
+	client.BestNodes = map[string]string{"group": "node:443"}
+	tunnel := &L3Tunnel{
+		client:            client,
+		conns:             make(map[string]*l3TunnelConn),
+		connecting:        make(map[string]*l3TunnelConnectCall),
+		dataChan:          make(chan []byte, 1),
+		closeCh:           make(chan struct{}),
+		reconnectInterval: time.Millisecond,
+		maxReconnect:      3,
+	}
+	var calls atomic.Int32
+	tunnel.connect = func(context.Context, string, *conntrackMgr) (*l3TunnelConn, error) {
+		calls.Add(1)
+		return nil, fmt.Errorf("dial failed: %w", net.ErrClosed)
+	}
+
+	result := make(chan error, 1)
+	go func() {
+		_, err := tunnel.getConn("group")
+		result <- err
+	}()
+
+	select {
+	case err := <-result:
+		if err == nil {
+			t.Fatal("getConn() error = nil, want reconnect budget error")
+		}
+		if !strings.Contains(err.Error(), "failed after 3 attempts") {
+			t.Fatalf("getConn() error = %v, want attempt-budget message", err)
+		}
+		if !errors.Is(err, net.ErrClosed) {
+			t.Fatalf("getConn() error = %v, want wrapped net.ErrClosed", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("getConn() blocked after exhausting the reconnect budget")
+	}
+
+	if got := calls.Load(); got != 3 {
+		t.Fatalf("connect calls = %d, want 3", got)
+	}
+	tunnel.connsMu.Lock()
+	_, pending := tunnel.connecting["group"]
+	tunnel.connsMu.Unlock()
+	if pending {
+		t.Fatal("failed connect call is still registered as pending")
+	}
+	tunnel.Close()
+}
+
+func TestTunnelReconnectWithoutLimitRetriesPastSmallBudgets(t *testing.T) {
+	client := newSessionTestClient()
+	client.BestNodes = map[string]string{"group": "node:443"}
+	tunnel := &L3Tunnel{
+		client:            client,
+		conns:             make(map[string]*l3TunnelConn),
+		connecting:        make(map[string]*l3TunnelConnectCall),
+		dataChan:          make(chan []byte, 1),
+		closeCh:           make(chan struct{}),
+		reconnectInterval: time.Millisecond,
+	}
+	var calls atomic.Int32
+	tunnel.connect = func(context.Context, string, *conntrackMgr) (*l3TunnelConn, error) {
+		// Without a configured budget the tunnel keeps retrying; close it
+		// after five attempts so the test can observe the retries.
+		if calls.Add(1) >= 5 {
+			tunnel.Close()
+		}
+		return nil, fmt.Errorf("dial failed: %w", net.ErrClosed)
+	}
+
+	if _, err := tunnel.getConn("group"); !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("getConn() error = %v, want net.ErrClosed", err)
+	}
+	if got := calls.Load(); got != 5 {
+		t.Fatalf("connect calls = %d, want 5 retries without a budget", got)
+	}
+}
+
+func TestNewL3TunnelUsesClientReconnectPolicy(t *testing.T) {
+	client := NewClient(ClientOptions{MaxReconnect: 4, ReconnectDelay: 250 * time.Millisecond})
+	client.setIP(net.IPv4(10, 0, 0, 2))
+	tunnel, err := NewL3Tunnel(client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tunnel.maxReconnect != 4 {
+		t.Fatalf("tunnel maxReconnect = %d, want 4", tunnel.maxReconnect)
+	}
+	if tunnel.reconnectInterval != 250*time.Millisecond {
+		t.Fatalf("tunnel reconnectInterval = %s, want 250ms", tunnel.reconnectInterval)
+	}
+
+	defaultedClient := NewClient(ClientOptions{})
+	defaultedClient.setIP(net.IPv4(10, 0, 0, 2))
+	defaulted, err := NewL3Tunnel(defaultedClient)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if defaulted.maxReconnect != 0 {
+		t.Fatalf("default tunnel maxReconnect = %d, want unlimited (0)", defaulted.maxReconnect)
+	}
+	if defaulted.reconnectInterval != defaultReconnectInterval {
+		t.Fatalf("default reconnectInterval = %s, want %s", defaulted.reconnectInterval, defaultReconnectInterval)
+	}
 }
 
 func TestReconnectDoesNotRaceForegroundConnect(t *testing.T) {

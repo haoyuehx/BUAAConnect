@@ -1,6 +1,29 @@
 package configs
 
+import (
+	"fmt"
+	"net/netip"
+	"strings"
+)
+
+type ProfileName string
+
+const (
+	ProfileSchool ProfileName = "school"
+	ProfileACT    ProfileName = "act"
+)
+
 type Config struct {
+	// BUAA Profile & lifecycle fields
+	Profile        string   `koanf:"profile"`
+	TunName        string   `koanf:"tun_name"`
+	ExtraRoutes    []string `koanf:"extra_routes"`
+	SystemDNS      string   `koanf:"system_dns"` // "auto", "resolvectl", "off"
+	Daemon         bool     `koanf:"daemon"`
+	StateDir       string   `koanf:"state_dir"`
+	MaxReconnect   int      `koanf:"max_reconnect"`
+	ReconnectDelay int      `koanf:"reconnect_delay"`
+
 	// Common fields
 	Protocol            string                 `koanf:"protocol"`
 	ServerAddress       string                 `koanf:"server_address"`
@@ -86,5 +109,67 @@ func Default() Config {
 		LoginDomain:             "Radius",
 		UpdateBestNodesInterval: 300,
 		SessionRefreshInterval:  1800,
+		DisableZJUConfig:        true,
+		SystemDNS:               "auto",
+		MaxReconnect:            5,
+		ReconnectDelay:          3,
 	}
+}
+
+// ProfileDefaults returns the built-in BUAA profile template for "school" or "act".
+func ProfileDefaults(profile string) (Config, error) {
+	cfg := Default()
+	cfg.TUNMode = true
+	cfg.AddRoute = true
+	cfg.AutoDetectInterface = true
+	cfg.SocksBind = "127.0.0.1:11080"
+	cfg.HTTPBind = "127.0.0.1:11081"
+
+	switch strings.ToLower(strings.TrimSpace(profile)) {
+	case string(ProfileSchool):
+		cfg.Profile = string(ProfileSchool)
+		cfg.Protocol = "easyconnect"
+		cfg.ServerAddress = "vpn.buaa.edu.cn"
+		cfg.ServerPort = 443
+		cfg.TunName = "buaa-school"
+		return cfg, nil
+	case string(ProfileACT):
+		cfg.Profile = string(ProfileACT)
+		cfg.Protocol = "easyconnect"
+		cfg.ServerAddress = "vpn.act.buaa.edu.cn"
+		cfg.ServerPort = 8443
+		cfg.TunName = "buaa-act"
+		return cfg, nil
+	default:
+		return Config{}, fmt.Errorf("unknown profile %q (expected %q or %q)", profile, ProfileSchool, ProfileACT)
+	}
+}
+
+// NormalizeExtraRoute validates and normalizes an IP or CIDR string into a canonical IPv4 CIDR prefix.
+func NormalizeExtraRoute(raw string) (netip.Prefix, error) {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return netip.Prefix{}, fmt.Errorf("empty extra route")
+	}
+	if strings.Contains(s, "/") {
+		prefix, err := netip.ParsePrefix(s)
+		if err != nil {
+			return netip.Prefix{}, fmt.Errorf("invalid extra route CIDR %q: %w", raw, err)
+		}
+		if !prefix.Addr().Is4() {
+			return netip.Prefix{}, fmt.Errorf("extra route %q must be IPv4", raw)
+		}
+		if prefix.Bits() < 8 {
+			return netip.Prefix{}, fmt.Errorf("extra route %q is too broad (prefix length must be >= 8)", raw)
+		}
+		return prefix.Masked(), nil
+	}
+	addr, err := netip.ParseAddr(s)
+	if err != nil {
+		return netip.Prefix{}, fmt.Errorf("invalid extra route IP %q: %w", raw, err)
+	}
+	if !addr.Is4() {
+		return netip.Prefix{}, fmt.Errorf("extra route %q must be IPv4", raw)
+	}
+	return netip.PrefixFrom(addr, 32), nil
 }

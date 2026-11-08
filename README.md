@@ -4,134 +4,146 @@
 
 本程序基于 [zju-connect](https://github.com/Mythologyli/zju-connect) 开发，针对北航网络环境进行适配。感谢上游维护者、贡献者及原始项目 [EasierConnect](https://github.com/lyc8503/EasierConnect) 的作者 [lyc8503](https://github.com/lyc8503)。
 
-> **当前状态：项目初始化。** 已导入上游实现并提供 ACT VPN 配置示例，尚未完成 BUAAConnect 的 ACT 登录和数据转发实机验证，暂未发布经过验证的安装包。
-
 ## 免责声明
 
 BUAAConnect 是个人维护的非官方项目，与北京航空航天大学、深信服及上游项目维护者无隶属或背书关系。相关名称和商标属于各自权利人。
 
 本程序按现状提供，不对适用性、正确性、可靠性或持续可用性作保证。使用者应遵守学校网络管理规定及适用法律，仅使用本人获授权的账号访问获授权的资源。本程序不用于绕过身份认证、访问控制、流量审计或安全检查。具体许可和责任限制以仓库中的 [LICENSE](LICENSE) 为准。
 
-## 项目目标与核心需求
+## 功能状态说明（已实现 / 已验证 / 待实机验证）
 
-BUAAConnect 的目标是在 Linux 上提供无需 EasyConnect 图形界面的命令行 VPN 使用方式：连接后，用户可以直接用 SSH 访问授权服务器，并在普通浏览器中打开授权的校内网站。
-
-客户端负责 VPN 认证、隧道、分流路由和 DNS；SSH 登录、网页显示和各业务系统的登录仍由原有应用负责。无需为门户中的 OA、教务、课程网站和每台服务器分别编写业务适配。
-
-### 首期目标
-
-| 能力 | 目标行为 |
-| --- | --- |
-| 两个入口 | 分别提供学校 VPN `vpn.buaa.edu.cn:443` 和 ACT VPN `vpn.act.buaa.edu.cn:8443` 连接配置，分别使用对应账号认证 |
-| 命令行操作 | 提供明确的连接、状态、断开和诊断操作；可以在后台维持连接 |
-| 直接访问 | 以 TUN、分流路由和 DNS 为主要使用路径；SSH 使用目标原地址，浏览器使用目标原网址，无需逐应用配置代理或逐服务器设置端口转发 |
-| 资源规则 | 优先读取服务端授予的 IP、域名和端口规则；允许配置额外目标路由，但不能增加账号的服务端访问权限 |
-| 分流与共存 | 默认只将授权校内资源流量送入 VPN；正确处理 VPN 入口直连，并尽量与现有 Clash 配置共存 |
-| 生命周期 | 处理退出、认证失败、网络中断和重连；清理由本程序创建的接口、路由和 DNS 配置 |
-| 凭据与日志 | 支持隐藏输入密码，配置及日志不泄露密码和会话凭据 |
-
-首期优先验证 Linux；Windows、macOS 和 GUI 暂不列入首期交付。学校 VPN 与 ACT VPN 首期支持择一连接，不要求同时连接两个入口。涉及认证的兼容性以实际服务端测试为准。
-
-SOCKS5 / HTTP 代理和端口转发保留为可选模式及调试手段，不能替代主要的 TUN 使用路径。下方 ACT 示例目前仍用于验证上游代理与转发能力，不代表上述首期目标已经实现。
-
-### 验收方式
-
-两个入口分别验证登录与退出，并在账号权限允许时验证：原地址 SSH、原网址网页访问、校内 DNS 解析、普通互联网访问、断开后的网络恢复。另行检查 Clash 开关、网段冲突、凭据错误和连接中断。未完成或缺少测试权限的项目应明确记录，不以“登录成功”代替数据通路验收。
+| 模块 / 能力 | 状态 | 说明 |
+| --- | --- | --- |
+| CLI 子命令 (`connect` / `status` / `disconnect` / `doctor` / `version`) | **已实现并通过单测/本地验证** | 支持子命令及传统 flag 兼容模式 |
+| 双 Profile 独立配置 (`--profile school` / `--profile act`) | **已实现并通过单测验证** | 学校 VPN (`vpn.buaa.edu.cn:443`) 与 ACT VPN (`vpn.act.buaa.edu.cn:8443`) 独立配置，默认禁用 ZJU 专属规则，绝不误连浙大 |
+| 凭据安全与隐藏输入 | **已实现并通过单测验证** | 支持终端无回显读取密码 (`term.ReadPassword`)、`BUAA_CONNECT_PASSWORD` 环境变量、命令行明文 `--password` 警告、日志与状态文件凭据脱敏 |
+| 后台运行 (`--daemon` / `-d`) 与进程归属保护 | **已实现并通过单测验证** | 前台完成密码读取后通过 stdin 管道启动后台子进程；Linux 下使用 `/proc/<pid>/stat` `starttime`（字段 22）+ basename 校验进程归属，防止过期 PID 误杀其他进程 |
+| TUN 分流路由、`--extra-routes` 与归属回滚 | **已实现并通过 Mock 单测验证** | 默认创建 `buaa-school` / `buaa-act` 接口（不假定 `tun0` 归属本程序）；跟踪本进程新增路由，已有路由冲突 (`File exists`) 不误删；支持初始化失败与退出回滚；对路由及 `--extra-routes` 自动排除 VPN 服务端自身 IP 防回环，并拒绝 `< /8` 的过宽额外路由 |
+| Linux 分流 DNS (`--system-dns auto\|resolvectl\|off`) | **已实现并通过 Mock 单测验证** | 通过 `resolvectl` 在 TUN 接口上配置客户端 VIP:53 与 `~buaa.edu.cn` 等校内域名分流，退出时 `resolvectl revert` |
+| Underlay 物理网卡绑定与 Clash 共存诊断 (`doctor`) | **已实现并通过单测与本机运行验证** | Underlay 自动探测排除 `POINTTOPOINT` / `tun*` / `Meta` / `mihomo` / `clash*` 虚拟接口；`doctor` 自动识别 Clash 关闭、普通代理、TUN 三种状态并给出证据与建议 |
+| 两个 VPN 入口网络可达性预检 | **已在当前环境观测可达** | `vpn.buaa.edu.cn:443` 与 `vpn.act.buaa.edu.cn:8443` 的 `/por/login_auth.csp` 握手响应已在当前环境预检可达 |
+| 真实账号登录、原 IP SSH、原网址浏览器访问与断开恢复 | **待用户本地输入凭据实机验证** | 需使用个人授权账号与 `sudo` / `CAP_NET_ADMIN` 权限在本地终端执行验证（见下方最短验证步骤） |
 
 ## 适配范围
 
-| 入口 | 当前状态 |
-| --- | --- |
-| ACT VPN：`vpn.act.buaa.edu.cn:8443` | 已提供初始配置，待实机验证 |
-| 学校 VPN：`vpn.buaa.edu.cn:443` | 已列为首期目标，待适配及实机验证 |
-| 其他 VPN / WebVPN 入口 | 不在首期范围 |
+| 入口 | Profile 名 | 地址 | 默认 TUN 接口名 |
+| --- | --- | --- | --- |
+| 学校 VPN | `school` | `vpn.buaa.edu.cn:443` | `buaa-school` |
+| ACT VPN | `act` | `vpn.act.buaa.edu.cn:8443` | `buaa-act` |
 
-上游具有 EasyConnect / aTrust、SOCKS5 / HTTP 代理、端口转发及 TUN 等实现。这些是继承的能力，不代表已在北航所有入口完成验证。
+两个入口分别认证，账号密码相互独立。客户端仅负责 VPN 认证、TUN 隧道、分流路由和 DNS，不负责具体业务网站登录或 SSH 账户认证。首期支持择一连接，不要求同时连接两个入口。
 
-本项目当前以命令行为入口，不提供 BUAAConnect 图形客户端。
+## 从源码构建与测试
 
-## 从源码构建
-
-需安装 Git 和满足 [go.mod](go.mod) 要求的 Go 工具链（当前为 Go 1.25.6）。
+需安装 Git 和满足 [go.mod](go.mod) 要求的 Go 工具链（Go 1.25+）：
 
 ```bash
 git clone https://github.com/haoyuehx/BUAAConnect.git
 cd BUAAConnect
+go test ./... -count=1
 go build -o buaaconnect .
-./buaaconnect -help
+./buaaconnect version
 ```
 
-当前仍保留上游 Go module 路径、部分内部命名及参数前缀，以减少初始改动和方便同步；可执行文件通过构建命令命名为 `buaaconnect`。
+### 权限说明（Linux TUN 模式）
 
-## ACT VPN 初次连接
+主路径（TUN + 分流路由 + `resolvectl` DNS）需要 `CAP_NET_ADMIN` 权限及 `/dev/net/tun` 访问权限。可以：
+1. 使用 `sudo ./buaaconnect connect ...` 运行；或
+2. 为二进制赋予最小网络管理能力：
+   ```bash
+   sudo setcap cap_net_admin+eip ./buaaconnect
+   ```
+如果仅使用 SOCKS5 / HTTP 代理或端口转发（`--tun-mode=false`），则无需管理员权限。
 
-先断开 EasyConnect，避免同时登录干扰验证。复制示例配置：
+## 快速开始与命令用法
+
+### 1. 环境与 Clash 共存诊断 (`doctor`)
+
+在连接前可运行 `doctor` 检查权限、`/dev/net/tun`、`resolvectl`、本地端口占用以及 Clash 共存状态：
+
+```bash
+./buaaconnect doctor
+./buaaconnect doctor --profile school
+./buaaconnect doctor --profile act
+```
+
+### 2. 连接学校 VPN (`school`)
+
+**方式 A：直接通过 `--profile school` 连接（终端隐藏输入密码）**
+
+```bash
+# 前台运行（按 Ctrl+C 断开并自动清理 TUN、路由与 DNS）
+sudo ./buaaconnect connect --profile school --username 'YOUR_BUAA_USERNAME'
+
+# 或：前台隐藏输入密码，认证及隧道建立成功后自动转入后台运行
+sudo ./buaaconnect connect --profile school --username 'YOUR_BUAA_USERNAME' --daemon
+```
+
+**方式 B：使用配置文件连接**
+
+```bash
+cp config.school.toml.example config.school.toml
+chmod 600 config.school.toml
+# 编辑 config.school.toml 填入 username（密码建议在连接时交互输入或通过环境变量 BUAA_CONNECT_PASSWORD 提供）
+sudo ./buaaconnect connect --config config.school.toml
+```
+
+### 3. 连接 ACT VPN (`act`)
+
+ACT 入口常常存在服务端下发资源列表不完整的情况，可通过 `--extra-routes`（或配置文件中的 `extra_routes`）显式将目标服务器 IP 或网段加入本机 TUN 路由与客户端转发白名单（注：额外路由仅改变本机入站转发，不增加服务端授予的账号权限）：
+
+```bash
+# 前台连接 ACT VPN，并添加目标服务器或网段路由
+sudo ./buaaconnect connect --profile act --username 'YOUR_ACT_USERNAME' --extra-routes '10.212.0.0/16,192.168.1.100'
+
+# 或后台运行
+sudo ./buaaconnect connect --profile act --username 'YOUR_ACT_USERNAME' --extra-routes '10.212.0.0/16' --daemon
+```
+
+使用配置文件：
 
 ```bash
 cp config.act.toml.example config.act.toml
 chmod 600 config.act.toml
+sudo ./buaaconnect connect --config config.act.toml
 ```
 
-在 zsh 中运行以下命令，替换 VPN 用户名。密码从终端隐藏输入，通过上游支持的环境变量提供，不直接写入命令历史：
-
-```zsh
-read -rs 'ZJU_CONNECT_PASSWORD?ACT VPN 密码：'
-echo
-export ZJU_CONNECT_PASSWORD
-./buaaconnect -config config.act.toml -username 'YOUR_ACT_USERNAME'
-unset ZJU_CONNECT_PASSWORD
-```
-
-如出现验证码或协议错误，以实际输出为准；当前不能保证该入口的所有认证方式均兼容。前台运行时，按 Ctrl+C 断开。
-
-默认代理仅监听本机：
-
-| 协议 | 地址 |
-| --- | --- |
-| SOCKS5 | `127.0.0.1:11080` |
-| HTTP | `127.0.0.1:11081` |
-
-普通 SSH 不会自动使用这些代理。如只需要访问一台 SSH 服务器，可以配置以下端口转发。
-
-## SSH 端口转发
-
-编辑 `config.act.toml`，将其中的 `port_forwarding = []` 替换为：
-
-```toml
-port_forwarding = [
-  { network_type = "tcp", bind_address = "127.0.0.1:2222", remote_address = "YOUR_SERVER_IP:22" }
-]
-```
-
-将 `YOUR_SERVER_IP` 换成本人有权访问的服务器地址。重启客户端并确认登录成功后，在另一终端执行：
+### 4. 查看状态 (`status`) 与连通性探测
 
 ```bash
-ssh -p 2222 YOUR_SERVER_USERNAME@127.0.0.1
+# 查看进程、认证、TUN 接口、分配 IP、已添加路由和 DNS 状态
+./buaaconnect status
+
+# 可选：指定授权目标地址验证连通性（未指定 --probe 时不会伪造“所有资源可达”）
+./buaaconnect status --probe 10.212.x.x:22
 ```
 
-服务器账号与 VPN 账号可能不同。首次连接应核对服务器 SSH 主机指纹。
+### 5. 断开连接 (`disconnect`)
 
-示例配置的 `proxy_all = true` 表示将进入本客户端代理或转发的目标交给 VPN，适用于验证服务端资源列表不完整的情况；它不会自动接管电脑全部流量，也不会增加服务端授予的访问权限。
+```bash
+# 校验进程归属后发送 SIGTERM 优雅退出，回滚本程序添加的路由、DNS 与 TUN 接口
+sudo ./buaaconnect disconnect
+```
 
-## 常见问题
+## 可选模式：SOCKS5 / HTTP 代理与端口转发
 
-- **VPN 登录成功，服务器仍不可达：** 检查资源权限、目标服务、转发配置和服务端资源列表。登录成功不等于所有内网地址均可访问。
-- **与 Clash 共用：** 本示例使用独立的本机监听端口。若开启其他工具的 TUN 模式，仍需检查 VPN 入口的直连规则和系统路由。
-- **端口已占用：** 更改 `socks_bind`、`http_bind` 或端口转发的本机端口。
-- **提交问题：** 请附操作系统、构建版本和脱敏后的错误输出；不要提交密码、验证码、Cookie、会话标识或私钥。
+当不启用 TUN 模式（`--tun-mode=false`）时，客户端默认在本地监听：
+- SOCKS5：`127.0.0.1:11080`
+- HTTP：`127.0.0.1:11081`
 
-## 后续工作
+也可以通过 `--tcp-port-forwarding 127.0.0.1:2222-YOUR_SERVER_IP:22` 或配置文件中的 `port_forwarding` 配置端口转发。
 
-- 验证学校 VPN 与 ACT VPN 的认证和资源获取。
-- 完善 TUN、分流路由、校内 DNS 和网络配置清理。
-- 增加连接状态、后台运行、诊断及受控重连。
-- 验证原地址 SSH、浏览器访问和 Clash 共存行为。
+## 与 Clash / 外部 TUN 共存说明
 
-以上是开发计划，不表示功能已完成。
+- **Clash 关闭或普通系统代理模式**：BUAAConnect 的 TUN 分流路由仅接管服务端下发网段及 `--extra-routes` 指定的校内目标，DNS 仅针对 `~buaa.edu.cn` 及服务端下发域名走 VPN，普通互联网流量不受影响。
+- **Clash TUN 模式或其他 VPN (`tun0`) 开启时**：
+  - BUAAConnect 自动探测底层接口时会排除 `tun*`、`utun*`、`Meta`、`mihomo`、`clash*` 等虚拟接口，避免把 VPN 隧道建立在 Clash TUN 之上导致回环；您也可以通过 `--bind-interface <物理网卡名，如 wlp4s0/eth0>` 显式指定物理网卡。
+  - BUAAConnect 不会清空或覆盖用户的 Clash 规则、接口或已有路由（遇到已有同前缀路由时仅告警并跳过归属记录，退出时绝不误删）。
+  - 若 Clash TUN 使用了全局 `ip rule` 策略路由或 `198.18.0.0/16` Fake-IP 劫持，运行 `./buaaconnect doctor` 会输出具体冲突证据与调整建议。
 
 ## 来源与许可证
 
-本项目使用 **AGPL-3.0** 许可证，保留上游许可证及源文件中的版权声明。修改、分发及通过网络提供服务时，请遵守相应许可要求。致谢不能替代许可证义务。
+本项目使用 **AGPL-3.0** 许可证，保留上游许可证及源文件中的版权声明。修改、分发及通过网络提供服务时，请遵守相应许可要求。
 
 - 直接上游：[Mythologyli/zju-connect](https://github.com/Mythologyli/zju-connect)
 - 原始项目：[lyc8503/EasierConnect](https://github.com/lyc8503/EasierConnect)

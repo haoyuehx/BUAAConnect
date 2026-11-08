@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto"
 	"crypto/tls"
+	"fmt"
 	"net"
 	"os"
 	"os/signal"
@@ -23,6 +24,8 @@ import (
 	"github.com/mythologyli/zju-connect/dial"
 	"github.com/mythologyli/zju-connect/internal/hook_func"
 	"github.com/mythologyli/zju-connect/internal/keylog"
+	"github.com/mythologyli/zju-connect/internal/netownership"
+	buaaruntime "github.com/mythologyli/zju-connect/internal/runtime"
 	"github.com/mythologyli/zju-connect/log"
 	"github.com/mythologyli/zju-connect/resolve"
 	"github.com/mythologyli/zju-connect/service"
@@ -44,13 +47,31 @@ func main() {
 
 	log.Init()
 
-	log.Println("Start ZJU Connect " + zjuConnectVersionString())
+	runtimeMgr, _ := buaaruntime.NewManager(conf.StateDir)
+	abortWithCleanup := func(phase buaaruntime.Phase, authStatus, format string, args ...any) {
+		msg := fmt.Sprintf(format, args...)
+		log.Println(msg)
+		if runtimeMgr != nil {
+			_ = runtimeMgr.UpdateState(func(s *buaaruntime.State) {
+				s.Phase = phase
+				if authStatus != "" {
+					s.AuthStatus = authStatus
+				}
+				s.TunnelStatus = "down"
+				s.LastError = msg
+			})
+		}
+		_ = hook_func.ExecTerminalFunc(context.Background())
+		os.Exit(1)
+	}
+
+	log.Println("Start BUAAConnect " + zjuConnectVersionString())
 	if conf.DebugDump {
 		log.EnableDebug()
 	}
 	if errs := hook_func.ExecInitialFunc(context.Background(), conf); errs != nil {
 		for _, err := range errs {
-			log.Printf("Initial ZJU-Connect failed: %s", err)
+			log.Printf("Initial BUAAConnect failed: %s", err)
 		}
 		os.Exit(1)
 	}
@@ -61,18 +82,23 @@ func main() {
 		LocalDNSServer: conf.LocalDNSServer,
 	})
 	if underlayErr != nil {
-		log.Fatalf("Create underlay dialer: %v", underlayErr)
+		abortWithCleanup(buaaruntime.PhaseError, "failed", "Create underlay dialer: %v", underlayErr)
 	}
 	tlsKeyLogWriter, tlsKeyLogErr := keylog.Open(conf.DebugTLSLogFile)
 	if tlsKeyLogErr != nil {
 		_ = underlayDialer.Close()
-		log.Fatalf("Create TLS key log: %v", tlsKeyLogErr)
+		abortWithCleanup(buaaruntime.PhaseError, "failed", "Create TLS key log: %v", tlsKeyLogErr)
 	}
 	if conf.DebugPCAPFile != "" {
 		log.Printf("VPN underlay PCAP capture enabled: %s", conf.DebugPCAPFile)
 	}
 	if conf.DebugTLSLogFile != "" {
 		log.Printf("TLS key logging enabled: %s", conf.DebugTLSLogFile)
+	}
+	if runtimeMgr != nil {
+		_ = runtimeMgr.UpdatePhase(buaaruntime.PhaseAuthenticating, map[string]string{
+			"auth_status": "authenticating",
+		})
 	}
 	var vpnClient client.Client
 	switch conf.Protocol {
@@ -81,12 +107,12 @@ func main() {
 		if conf.CertFile != "" {
 			p12Data, err := os.ReadFile(conf.CertFile)
 			if err != nil {
-				log.Fatalf("Read certificate file error: %s", err)
+				abortWithCleanup(buaaruntime.PhaseError, "failed", "Read certificate file error: %s", err)
 			}
 
 			key, cert, err := pkcs12.Decode(p12Data, conf.CertPassword)
 			if err != nil {
-				log.Fatalf("Decode certificate file error: %s", err)
+				abortWithCleanup(buaaruntime.PhaseError, "failed", "Decode certificate file error: %s", err)
 			}
 
 			tlsCert = tls.Certificate{
@@ -111,6 +137,8 @@ func main() {
 				Fetch:          !conf.DisableServerConfig,
 				IncludeDomains: !conf.SkipDomainResource,
 			},
+			MaxReconnect:    conf.MaxReconnect,
+			ReconnectDelay:  time.Duration(conf.ReconnectDelay) * time.Second,
 			UnderlayDialer:  underlayDialer,
 			TLSKeyLogWriter: tlsKeyLogWriter,
 		})
@@ -123,7 +151,7 @@ func main() {
 			if tlsKeyLogWriter != nil {
 				_ = tlsKeyLogWriter.Close()
 			}
-			log.Fatalf("VPN client setup error: %s", err)
+			abortWithCleanup(buaaruntime.PhaseError, "failed", "VPN client setup error: %s", err)
 		}
 		if vpnClient.CanUseTCPTunnel() {
 			conf.TCPTunnelMode = true
@@ -135,7 +163,7 @@ func main() {
 		if conf.ResourceFile != "" {
 			resourceData, err = os.ReadFile(conf.ResourceFile)
 			if err != nil {
-				log.Fatalf("Read resource file error: %s", err)
+				abortWithCleanup(buaaruntime.PhaseError, "failed", "Read resource file error: %s", err)
 			}
 		}
 
@@ -162,7 +190,7 @@ func main() {
 				OAuth2Code:    conf.OAuth2Code,
 			})
 			if err != nil {
-				log.Fatalf("Configure aTrust login: %v", err)
+				abortWithCleanup(buaaruntime.PhaseError, "failed", "Configure aTrust login: %v", err)
 			}
 		}
 
@@ -174,6 +202,8 @@ func main() {
 				MACAddresses: conf.MACAddresses,
 				SignKey:      conf.SignKey,
 			},
+			MaxReconnect:    conf.MaxReconnect,
+			ReconnectDelay:  time.Duration(conf.ReconnectDelay) * time.Second,
 			UnderlayDialer:  underlayDialer,
 			TLSKeyLogWriter: tlsKeyLogWriter,
 		})
@@ -195,6 +225,8 @@ func main() {
 			ResourceData:             resourceData,
 			BestNodesRefreshInterval: time.Duration(conf.UpdateBestNodesInterval) * time.Second,
 			SessionRefreshInterval:   time.Duration(conf.SessionRefreshInterval) * time.Second,
+			MaxReconnect:             conf.MaxReconnect,
+			ReconnectDelay:           time.Duration(conf.ReconnectDelay) * time.Second,
 			SaveClientData:           saveClientDataFunc,
 		})
 		if err != nil {
@@ -203,7 +235,7 @@ func main() {
 			if tlsKeyLogWriter != nil {
 				_ = tlsKeyLogWriter.Close()
 			}
-			log.Fatalf("VPN client setup error: %s", err)
+			abortWithCleanup(buaaruntime.PhaseError, "failed", "VPN client setup error: %s", err)
 		}
 	}
 
@@ -292,24 +324,100 @@ func main() {
 				}
 			}
 		}
+	} else {
+		for _, customProxyDomain := range conf.CustomProxyDomain {
+			if domainResources != nil {
+				domainResources[customProxyDomain] = append(domainResources[customProxyDomain], client.DomainResource{
+					PortMin:  1,
+					PortMax:  65535,
+					Protocol: "all",
+				})
+			} else {
+				domainResources = client.DomainResources{
+					customProxyDomain: {{
+						PortMin:  1,
+						PortMax:  65535,
+						Protocol: "all",
+					}},
+				}
+			}
+		}
+	}
+
+	var serverIPs []net.IP
+	resolveHostIPs := func(host string) {
+		if host == "" {
+			return
+		}
+		if h, _, splitErr := net.SplitHostPort(host); splitErr == nil {
+			host = h
+		}
+		if parsed := net.ParseIP(host); parsed != nil {
+			serverIPs = append(serverIPs, parsed)
+		} else if resolved, lookupErr := net.LookupIP(host); lookupErr == nil {
+			serverIPs = append(serverIPs, resolved...)
+		}
+	}
+	resolveHostIPs(conf.ServerAddress)
+	if hoster, ok := vpnClient.(interface{ ServerHost() string }); ok {
+		resolveHostIPs(hoster.ServerHost())
+	}
+
+	if len(conf.ExtraRoutes) > 0 && !conf.TUNMode {
+		mergedRes, extraPrefixes, mergeErr := netownership.MergeExtraRoutes(ipResources, ipSet, conf.ExtraRoutes, serverIPs)
+		if mergeErr != nil {
+			abortWithCleanup(buaaruntime.PhaseError, "authenticated", "Invalid extra routes: %v", mergeErr)
+		}
+		ipResources = mergedRes
+		if updatedSet, setErr := netownership.AppendExtraRoutesToIPSet(ipSet, extraPrefixes); setErr == nil {
+			ipSet = updatedSet
+		}
 	}
 
 	var vpnStack stack.Stack
+	var vpnTUNStack *tun.Stack
 	if conf.TCPTunnelMode {
 		vpnStack, err = tcptunnel.NewStack(vpnClient)
 		if err != nil {
-			log.Fatalf("TCP Tunnel stack setup error: %s", err)
+			abortWithCleanup(buaaruntime.PhaseError, "authenticated", "TCP Tunnel stack setup error: %s", err)
 		}
 	} else if conf.TUNMode {
-		vpnTUNStack, err := tun.NewStack(vpnClient, conf.DNSHijack, conf.FakeIP, ipResources)
+		vpnTUNStack, err = tun.NewStackWithOptions(vpnClient, tun.Options{
+			TunName:     conf.TunName,
+			DNSHijack:   conf.DNSHijack,
+			FakeIP:      conf.FakeIP,
+			IPResources: ipResources,
+			ExtraRoutes: conf.ExtraRoutes,
+			ServerIPs:   serverIPs,
+			SystemDNS:   conf.SystemDNS,
+			DNSDomains:  conf.CustomProxyDomain,
+		})
 		if err != nil {
-			log.Fatalf("Tun stack setup error, make sure you are root user : %s", err)
+			abortWithCleanup(buaaruntime.PhaseError, "authenticated", "TUN stack setup error (root/CAP_NET_ADMIN required): %s", err)
+		}
+		if len(conf.ExtraRoutes) > 0 {
+			if mergedRes, _, mergeErr := netownership.MergeExtraRoutes(ipResources, ipSet, conf.ExtraRoutes, serverIPs); mergeErr == nil {
+				ipResources = mergedRes
+			}
 		}
 
 		if conf.AddRoute && ipSet != nil {
 			for _, prefix := range ipSet.Prefixes() {
+				skipServer := false
+				for _, srvIP := range serverIPs {
+					if addr, ok := netaddr.FromStdIP(srvIP); ok && prefix.Contains(addr) {
+						skipServer = true
+						break
+					}
+				}
+				if skipServer {
+					log.Printf("Skip route %s because it contains VPN server address", prefix.String())
+					continue
+				}
 				log.Printf("Add route to %s", prefix.String())
-				_ = vpnTUNStack.AddRoute(prefix.String())
+				if routeErr := vpnTUNStack.AddRoute(prefix.String()); routeErr != nil {
+					log.Printf("Warning: add route %s: %v", prefix.String(), routeErr)
+				}
 			}
 		} else if !conf.AddRoute && !conf.DisableZJUConfig && conf.Protocol == "easyconnect" {
 			log.Println("Add route to 10.0.0.0/8")
@@ -324,7 +432,7 @@ func main() {
 	} else {
 		vpnStack, err = gvisor.NewStack(vpnClient)
 		if err != nil {
-			log.Fatalf("gVisor stack setup error: %s", err)
+			abortWithCleanup(buaaruntime.PhaseError, "authenticated", "gVisor stack setup error: %s", err)
 		}
 	}
 
@@ -335,7 +443,7 @@ func main() {
 		remoteDNSServer, err = vpnClient.DNSServer()
 		if err != nil {
 			useRemoteDNS = false
-			remoteDNSServer = "10.10.0.21"
+			remoteDNSServer = ""
 			log.Println("No DNS server provided by server. Disable remote DNS")
 		} else {
 			log.Printf("Use DNS server %s provided by server", remoteDNSServer)
@@ -368,15 +476,45 @@ func main() {
 		ipAddr := net.ParseIP(customDns.IP)
 		if ipAddr == nil {
 			log.Printf("Custom DNS for host name %s is invalid, SKIP", customDns.HostName)
+			continue
 		}
 		vpnResolver.SetPermanentDNS(customDns.HostName, ipAddr)
 		log.Printf("Add custom DNS: %s -> %s\n", customDns.HostName, customDns.IP)
 	}
-	localResolver := service.NewDnsServer(vpnResolver, []string{remoteDNSServer, conf.SecondaryDNSServer})
+	localResolver := service.NewDnsServer(vpnResolver, []string{remoteDNSServer, secondaryDNSServer})
 	vpnStack.SetupResolve(localResolver)
 	vpnStack.SetupIPPool(vpnResolver.IPPool)
 
 	go vpnStack.Run()
+
+	if runtimeMgr != nil {
+		hook_func.RegisterTerminalFunc("CleanupRuntimeState", func(ctx context.Context) error {
+			return runtimeMgr.Remove()
+		})
+		_ = runtimeMgr.UpdateState(func(s *buaaruntime.State) {
+			s.Phase = buaaruntime.PhaseConnected
+			s.AuthStatus = "authenticated"
+			if conf.TUNMode && vpnTUNStack != nil {
+				s.TunnelStatus = "up"
+				s.TunInterface = vpnTUNStack.InterfaceName()
+				s.AddedRoutes = vpnTUNStack.AddedRoutes()
+			} else {
+				s.TunnelStatus = "proxy_only"
+			}
+			if clientIP, ipErr := vpnClient.IP(); ipErr == nil && clientIP != nil {
+				s.ClientIP = clientIP.String()
+			}
+			s.UnderlayInterface = underlayDialer.InterfaceName()
+			if remoteDNSServer != "" {
+				s.DNSServers = []string{remoteDNSServer, secondaryDNSServer}
+			} else if secondaryDNSServer != "" {
+				s.DNSServers = []string{secondaryDNSServer}
+			}
+			s.SystemDNSMode = conf.SystemDNS
+			s.SocksBind = conf.SocksBind
+			s.HTTPBind = conf.HTTPBind
+		})
+	}
 
 	vpnDialer := dial.NewDialer(vpnStack, vpnResolver, ipResources, conf.ProxyAll, conf.DialDirectProxy)
 
@@ -428,22 +566,35 @@ func main() {
 		}
 	}
 
+	var stackErrCh <-chan error
+	if vpnTUNStack != nil {
+		stackErrCh = vpnTUNStack.Err()
+	}
+
 	if runtime.GOOS == "windows" {
 		done := make(chan os.Signal, 1)
 		signal.Notify(done, syscall.SIGINT)
 		winquit.SimulateSigTermOnQuit(done)
-		<-done
+		select {
+		case <-done:
+		case err := <-stackErrCh:
+			log.Printf("TUN stack stopped with error: %v", err)
+		}
 	} else {
 		quit := make(chan os.Signal, 1)
 		signal.Notify(quit, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
-		<-quit
+		select {
+		case <-quit:
+		case err := <-stackErrCh:
+			log.Printf("TUN stack stopped with error: %v", err)
+		}
 	}
-	log.Println("Shutdown ZJU-Connect ......")
+	log.Println("Shutdown BUAAConnect ......")
 	if errs := hook_func.ExecTerminalFunc(context.Background()); errs != nil {
 		for _, err := range errs {
-			log.Printf("Shutdown ZJU-Connect failed: %s", err)
+			log.Printf("Shutdown BUAAConnect failed: %s", err)
 		}
 	} else {
-		log.Println("Shutdown ZJU-Connect success, Bye~")
+		log.Println("Shutdown BUAAConnect success, Bye~")
 	}
 }
