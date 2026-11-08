@@ -1,279 +1,111 @@
-# ZJU Connect
+# BUAAConnect
 
-> 🚫 **免责声明**
->
-> 本程序**按原样提供**，作者**不对程序的正确性或可靠性提供保证**，请使用者自行判断具体场景是否适合使用该程序，**使用该程序造成的问题或后果由使用者自行承担**！
+面向北京航空航天大学网络环境的第三方 Go 命令行 VPN 客户端。
 
----
+本程序基于 [zju-connect](https://github.com/Mythologyli/zju-connect) 开发，针对北航网络环境进行适配。感谢上游维护者、贡献者及原始项目 [EasierConnect](https://github.com/lyc8503/EasierConnect) 的作者 [lyc8503](https://github.com/lyc8503)。
 
-中文 | [English](README_en.md)
+> **当前状态：项目初始化。** 已导入上游实现并提供 ACT VPN 配置示例，尚未完成 BUAAConnect 的 ACT 登录和数据转发实机验证，暂未发布经过验证的安装包。
 
-**本程序基于 [EasierConnect](https://github.com/lyc8503/EasierConnect)（现已停止维护）完成，感谢原作者 [lyc8503](https://github.com/lyc8503)。**
+## 免责声明
 
-**QQ 交流群：1037726410**，欢迎使用者加入交流。
+BUAAConnect 是个人维护的非官方项目，与北京航空航天大学、深信服及上游项目维护者无隶属或背书关系。相关名称和商标属于各自权利人。
 
-### 使用方法
+本程序按现状提供，不对适用性、正确性、可靠性或持续可用性作保证。使用者应遵守学校网络管理规定及适用法律，仅使用本人获授权的账号访问获授权的资源。本程序不用于绕过身份认证、访问控制、流量审计或安全检查。具体许可和责任限制以仓库中的 [LICENSE](LICENSE) 为准。
 
-#### 使用 GUI 版客户端
+## 适配范围
 
-+ 如果你是来自 ZJU 的用户：
-  + Windows 用户推荐使用 [ZJU Connect for Windows](https://github.com/mythologyli/zju-connect-for-Windows)。
-  + Linux/macOS 用户可以尝试使用 [Chenx Dust](https://github.com/chenx-dust) 开发的客户端 [EZ4Connect](https://github.com/chenx-dust/EZ4Connect)（推荐，支持 aTrust 协议）或 [kowyo](https://github.com/kowyo) 开发的客户端 [hitsz-connect-verge](https://github.com/kowyo/hitsz-connect-verge)。
-    注意请设置服务器地址为 `rvpn.zju.edu.cn:443`。
-+ 如果你是非 ZJU 的用户：
+| 入口 | 当前状态 |
+| --- | --- |
+| ACT VPN：`vpn.act.buaa.edu.cn:8443` | 已提供初始配置，待实机验证 |
+| 学校其他 VPN 入口 | 尚未验证，暂不宣称支持 |
 
-  可以尝试使用 [Chenx Dust](https://github.com/chenx-dust) 开发的客户端 [EZ4Connect](https://github.com/chenx-dust/EZ4Connect)（推荐，支持 aTrust 协议）或 [kowyo](https://github.com/kowyo) 开发的客户端 [hitsz-connect-verge](https://github.com/kowyo/hitsz-connect-verge)。
+上游具有 EasyConnect / aTrust、SOCKS5 / HTTP 代理、端口转发及 TUN 等实现。这些是继承的能力，不代表已在北航所有入口完成验证。
 
-#### 直接运行
+本项目当前以命令行为入口，不提供 BUAAConnect 图形客户端。
 
-##### 使用 EasyConnect 协议
+## 从源码构建
 
-+ 如果你是来自 ZJU 的用户：
+需安装 Git 和满足 [go.mod](go.mod) 要求的 Go 工具链（当前为 Go 1.25.6）。
 
-  1. 在 [Release](https://github.com/mythologyli/zju-connect/releases) 页面下载对应平台的最新版本。
+```bash
+git clone https://github.com/haoyuehx/BUAAConnect.git
+cd BUAAConnect
+go build -o buaaconnect .
+./buaaconnect -help
+```
 
-  2. 以 macOS 为例，解压出可执行文件 `zju-connect`。
+当前仍保留上游 Go module 路径、部分内部命名及参数前缀，以减少初始改动和方便同步；可执行文件通过构建命令命名为 `buaaconnect`。
 
-  3. macOS 需要先解除安全限制。命令行运行：`sudo xattr -rd com.apple.quarantine zju-connect`。
+## ACT VPN 初次连接
 
-  4. 命令行运行：`./zju-connect -protocol easyconnect -username <上网账户> -password <密码>`。
+先断开 EasyConnect，避免同时登录干扰验证。复制示例配置：
 
-  5. 此时 `1080` 端口为 Socks5 代理，`1081` 端口为 HTTP 代理。如需更改默认端口，请参考参数说明。
+```bash
+cp config.act.toml.example config.act.toml
+chmod 600 config.act.toml
+```
 
-+ 如果你是非 ZJU 的用户：
+在 zsh 中运行以下命令，替换 VPN 用户名。密码从终端隐藏输入，通过上游支持的环境变量提供，不直接写入命令历史：
 
-  其他步骤与上述相同，运行参数请尝试设置为：
+```zsh
+read -rs 'ZJU_CONNECT_PASSWORD?ACT VPN 密码：'
+echo
+export ZJU_CONNECT_PASSWORD
+./buaaconnect -config config.act.toml -username 'YOUR_ACT_USERNAME'
+unset ZJU_CONNECT_PASSWORD
+```
 
-  `./zju-connect -server <服务器地址> -port <服务器端口> -username xxx -password xxx -disable-zju-config -skip-domain-resource -remote-dns-server auto`
+如出现验证码或协议错误，以实际输出为准；当前不能保证该入口的所有认证方式均兼容。前台运行时，按 Ctrl+C 断开。
 
-  如果你的服务器需要输入图形验证码，运行参数请尝试设置为：
+默认代理仅监听本机：
 
-  `./zju-connect -server <服务器地址> -port <服务器端口> -username xxx -password xxx -disable-zju-config -skip-domain-resource -remote-dns-server auto -disable-multi-line -graph-code-file graph_code.jpg`
+| 协议 | 地址 |
+| --- | --- |
+| SOCKS5 | `127.0.0.1:11080` |
+| HTTP | `127.0.0.1:11081` |
 
-  登录时会将图片保存至 `graph_code.jpg` 文件，请查看并手动输入验证码。
+普通 SSH 不会自动使用这些代理。如只需要访问一台 SSH 服务器，可以配置以下端口转发。
 
-  *详情见此[链接](https://github.com/Mythologyli/zju-connect/issues/65#issuecomment-2650185322)*
+## SSH 端口转发
 
-##### 使用 aTrust 协议
+编辑 `config.act.toml`，将其中的 `port_forwarding = []` 替换为：
 
-+ 如果你是来自 ZJU 的用户：
+```toml
+port_forwarding = [
+  { network_type = "tcp", bind_address = "127.0.0.1:2222", remote_address = "YOUR_SERVER_IP:22" }
+]
+```
 
-  其他步骤与 EasyConnect 相同，运行参数请设置为：
+将 `YOUR_SERVER_IP` 换成本人有权访问的服务器地址。重启客户端并确认登录成功后，在另一终端执行：
 
-  `./zju-connect -protocol atrust -username <上网账户> -password <密码> -client-data-file client_data.json`
+```bash
+ssh -p 2222 YOUR_SERVER_USERNAME@127.0.0.1
+```
 
-  之后按照提示操作。如果你不希望保存登录状态，可以不填 `-client-data-file` 参数。
+服务器账号与 VPN 账号可能不同。首次连接应核对服务器 SSH 主机指纹。
 
-+ 如果你是非 ZJU 的用户：
+示例配置的 `proxy_all = true` 表示将进入本客户端代理或转发的目标交给 VPN，适用于验证服务端资源列表不完整的情况；它不会自动接管电脑全部流量，也不会增加服务端授予的访问权限。
 
-  其他步骤与 ZJU 用户相同，请根据情况指定登录域及协议。
+## 常见问题
 
-  **如何确定登录域及协议？**
+- **VPN 登录成功，服务器仍不可达：** 检查资源权限、目标服务、转发配置和服务端资源列表。登录成功不等于所有内网地址均可访问。
+- **与 Clash 共用：** 本示例使用独立的本机监听端口。若开启其他工具的 TUN 模式，仍需检查 VPN 入口的直连规则和系统路由。
+- **端口已占用：** 更改 `socks_bind`、`http_bind` 或端口转发的本机端口。
+- **提交问题：** 请附操作系统、构建版本和脱敏后的错误输出；不要提交密码、验证码、Cookie、会话标识或私钥。
 
-  1. 运行 `./zju-connect -protocol atrust -server <服务器地址> -port <服务器端口> -auth-info`。
-  2. 该命令会获取可用的认证方式，例如
-     ```json
-     [{"loginDomain":"Radius","authType":"auth/psw","authName":"上网账号","loginUrl":""},{"loginDomain":"local","authType":"auth/psw","authName":"IDC运维账号","loginUrl":""},{"loginDomain":"radius93482","authType":"auth/psw","authName":"INTL ID","loginUrl":""}]
-     ```
-     包含三个登录方式。方式一的登录域为 `Radius`，认证类型为 `auth/psw`。如果要使用方式一登录，则需要在运行参数中添加 `-login-domain Radius -auth-type "auth/psw"`。
-  3. 目前支持的认证类型包括 `auth/psw`（密码验证）、`auth/cas`（CAS 验证）、`auth/smsCheckCode`（短信验证码验证）。
+## 后续工作
 
-#### 作为服务运行
+- 验证 ACT 登录、SSH 转发、退出和网络中断行为。
+- 完善北航连接配置及连接诊断。
+- 增加便捷的凭据输入和后台运行管理。
+- 按实际测试结果扩展其他北航 VPN 入口。
 
-[链接](docs/service.md)
+以上是开发计划，不表示功能已完成。
 
-#### Docker 运行
+## 来源与许可证
 
-[链接](docs/docker.md)
+本项目使用 **AGPL-3.0** 许可证，保留上游许可证及源文件中的版权声明。修改、分发及通过网络提供服务时，请遵守相应许可要求。致谢不能替代许可证义务。
 
-### 警告
-
-1. 当使用其他开启了 TUN 模式的代理工具，同时配合 zju-connect 作为下游代理时，请注意务必提供正确的分流规则，参考[此 issue](https://github.com/Mythologyli/zju-connect/issues/57)
-
-### TUN 模式注意事项
-
-1. 需要管理员权限运行
-
-2. Windows 系统需要前往 [Wintun 官网](https://www.wintun.net)下载 `wintun.dll` 并放置于可执行文件同目录下
-
-3. EasyConnect 协议下的推荐配置为 `-tun-mode -add-route -dns-hijack`
-
-4. aTrust 协议下的推荐配置为 `-tun-mode -add-route -dns-hijack -fake-ip`。在使用 aTrust 协议时，如果不使用 DNS劫持/Fake IP，直接通过 TUN 网卡的涉及域名的 TCP 流量可能会出错
-
-### 参数说明
-
-#### 通用参数
-
-+ `protocol`: 登录协议，支持 `easyconnect`/`atrust`，默认为 `easyconnect`
-
-+ `server`: VPN 服务端地址，默认为 `rvpn.zju.edu.cn`/`vpn.zju.edu.cn`
-
-+ `port`: VPN 服务端端口，默认为 `443`
-
-+ `username`: 网络账户。例如：学号
-
-+ `password`: 网络账户密码（敏感信息建议使用环境变量 `ZJU_CONNECT_PASSWORD` 给定）
-
-+ `graph-code-file`: 图形验证码文件路径。默认为空。在 aTrust 模式下，留空时使用浏览器完成验证码，设置路径则登录时会将图形验证码保存至该文件，由用户手动输入 JSON
-
-+ `totp-secret`: TOTP 密钥，可用于自动完成 TOTP 验证。如服务端无需 TOTP 验证或希望手动输入验证码，可不填（敏感信息建议使用环境变量 `ZJU_CONNECT_TOTP_SECRET` 给定）
-
-+ `disable-remote-dns`: 禁用远端 DNS 改用本地 DNS，一般不需要加此参数
-
-+ `disable-server-config`: 禁用服务端配置，一般不需要加此参数
-
-+ `socks-bind`: SOCKS5 代理监听地址，默认为 `:1080`
-
-+ `socks-user`: SOCKS5 代理用户名，不填则不需要认证
-
-+ `socks-passwd`: SOCKS5 代理密码，不填则不需要认证
-
-+ `http-bind`: HTTP 代理监听地址，默认为 `:1081`。为 `""` 时不启用 HTTP 代理
-
-+ `shadowsocks-url`: Shadowsocks 服务端 URL。例如：`ss://aes-128-gcm:password@server:port`。格式[参考此处](https://github.com/shadowsocks/go-shadowsocks2)
-
-+ `dial-direct-proxy`: 当 URL 未命中规则，切换到直连时使用代理，常用于与其他代理工具配合的场景，目前仅支持 http 代理。例如：`http://127.0.0.1:7890"`，为 `""` 时不启用
-
-+ `tcp-tunnel-mode`: TCP 隧道模式，默认为 `false`。启用后仅可通过 TCP 隧道代理 TCP 流量。由于只有 aTrust 支持 TCP 隧道，此模式在 EasyConnect 下无效。启用后会禁用 TUN 模式
-
-+ `tun-mode`: TUN 模式（实验性）。请阅读 TUN 模式注意事项
-
-+ `add-route`: 启用 TUN 模式时根据服务端下发配置添加路由
-
-+ `dns-ttl`: DNS 缓存时间，默认为 `3600` 秒
-
-+ `disable-keep-alive`: 禁用定时保活，一般不需要加此参数
-
-+ `keep-alive-url`: 使用 HTTP 保活，适用于服务端不下发 DNS 的情况。填写要访问的 URL，例如 `https://www.cnki.net/favicon.ico` 。默认为空，此时使用服务端下发的 DNS 保活
-
-+ `remote-dns-server`: 远端 DNS 服务器地址，默认为 `auto`。设置为 auto 时使用从服务端获取的 DNS 服务器，如果未能获取则禁用远端 DNS
-
-+ `secondary-dns-server`: 当远端 DNS 无法解析时使用的备用服务器。默认值 `auto` 优先采用 VPN 策略下发的第二 DNS，否则回退到 `114.114.114.114`。留空则使用系统默认 DNS，但在开启 `dns-hijack` 时必须设置
-
-+ `dns-server-bind`: DNS 服务器监听地址，默认为空即禁用。例如，设置为 `127.0.0.1:53`，则可向 `127.0.0.1:53` 发起 DNS 请求
-
-+ `local-dns-server`: 指定用于解析 VPN 服务器域名的本地 DNS，格式为 IP 或 IP:port；留空时使用系统 DNS，可路由的 DNS 地址在探测成功后绑定到底层网卡，本地 DNS stub 保持 loopback 路由
-
-+ `dns-hijack`: 启用 TUN 模式时劫持 DNS 请求，建议在启用 TUN 模式时添加此参数
-
-+ `fake-ip`: 启用 Fake IP 功能，与 dns-hijack 配合使用，建议在使用 aTrust 协议并启用 TUN 模式时添加此参数。此参数在 EasyConnect 协议下无效
-
-+ `debug-dump`: 是否开启调试，一般不需要加此参数
-
-+ `debug-pcap-file`: 根据 VPN 底层 TCP 连接实际收发的数据重建 PCAP 文件，仅用于调试；捕获队列满时会阻塞网络读写，不包含内核握手和重传，TLS 内容仍为密文
-
-+ `debug-tls-log-file`: 将 TLS 会话密钥导出为 NSS key log 格式，可配合 `debug-pcap-file` 在 Wireshark 中解密 TLS 流量。该文件包含会话密钥，仅用于调试并应妥善保管
-
-+ `bind-interface`: 手动指定 VPN 底层连接使用的网卡接口，支持 EasyConnect 和 aTrust。非空时优先使用该接口，不再自动探测
-
-+ `auto-detect-interface`: 自动探测并绑定 VPN 底层网卡，默认为 `false`。设为 `true` 时启用自动探测；未启用且未指定 `bind-interface` 时，底层连接使用系统路由。**若同时使用其他启用了 Fake IP 的 VPN，此功能可能无法正常工作**
-
-+ `tcp-port-forwarding`: TCP 端口转发，格式为 `本地地址-远程地址,本地地址-远程地址,...`，例如 `127.0.0.1:9898-10.10.98.98:80,0.0.0.0:9899-10.10.98.98:80`。多个转发用 `,` 分隔
-
-+ `udp-port-forwarding`: UDP 端口转发，格式为 `本地地址-远程地址,本地地址-远程地址,...`，例如 `127.0.0.1:53-10.10.0.21:53`。多个转发用 `,` 分隔
-
-+ `custom-dns`: 指定自定义 DNS 解析结果，格式为 `域名:IP,域名:IP,...`，例如 `www.cc98.org:10.10.98.98,appservice.zju.edu.cn:10.203.8.198`。多个解析用 `,` 分隔
-
-+ `proxy-all`: 是否代理所有流量，一般不需要加此参数
-
-+ `config`: 指定配置文件，内容参考 `config.toml.example`
-
-配置按“内置默认值 < TOML 配置文件 < 环境变量 < 命令行参数”的优先级合并。只有显式提供的命令行参数会覆盖其他来源，例如 `-tun-mode=false` 可以关闭配置文件或环境变量中启用的选项。
-
-配置项均可使用带 `ZJU_CONNECT_` 前缀的大写环境变量设置，例如 `server_address` 对应 `ZJU_CONNECT_SERVER_ADDRESS`，`tun_mode` 对应 `ZJU_CONNECT_TUN_MODE`。集合项使用与命令行参数相同的语法和名称，例如 `ZJU_CONNECT_TCP_PORT_FORWARDING=127.0.0.1:9898-10.10.98.98:80`、`ZJU_CONNECT_CUSTOM_DNS=www.cc98.org:10.10.98.98` 和 `ZJU_CONNECT_CUSTOM_PROXY_DOMAIN=nature.com,science.org`。
-
-旧名称 `disable_zju_dns`、`zju_dns_server` 及其命令行参数和环境变量仍然兼容，但已弃用；请改用 `disable_remote_dns` 和 `remote_dns_server`。
-
-#### EasyConnect 相关参数
-
-+ `cert-file`: p12 证书文件路径，如果服务器要求证书验证，需要配置此参数
-
-+ `cert-password`: 证书密码 (敏感信息建议使用环境变量 `ZJU_CONNECT_CERT_PASSWORD` 给定)
-
-+ `skip-domain-resource`: 不使用服务端下发的域名资源分流，一般不需要加此参数
-
-+ `disable-multi-line`: 禁用自动根据延时选择线路。加此参数后，使用 `server` 参数指定的线路
-
-+ `disable-zju-config`: 禁用 ZJU 相关配置，非 ZJU 用户可能需要添加此参数
-
-+ `custom-proxy-domain`: 指定自定义域名使用 RVPN 代理，格式为 `域名,域名,...`，例如 `nature.com,science.org`。多个域名用 `,` 分隔
-
-+ `twf-id`: twfID 登录，调试用途，一般不需要加此参数
-
-#### aTrust 相关参数
-
-+ `auth-type`: aTrust 登录验证类型，支持 `auth/psw`（密码验证）、`auth/cas`（CAS 验证）、`auth/smsCheckCode`（短信验证码验证），默认为自动检测
-
-+ `login-domain`: 登录域，默认为 `Radius`
-
-+ `client-data-file`: 客户端数据文件路径，可用于保存登录状态，避免重复验证
-
-+ `cas-ticket`: CAS 验证票据，默认为空，此时进入交互式验证
-
-+ `phone`: 短信验证码登录时使用的手机号
-
-+ `update-best-nodes-interval`: 自动选择最优线路的更新间隔，单位为秒，默认为 `300` 秒。设置为 `0` 则禁用自动选择最优线路
-
-+ `session-refresh-interval`: aTrust SID 刷新间隔，单位为秒，默认为 `1800`。设置为 `0` 则禁用定时刷新。
-
-+ `auth-info`: 仅获取 aTrust 验证信息而不登录，一般不需要加此参数。可用于查看服务端支持的验证方式
-
-+ `trust-device`: 设置当前设备为授信终端（需要已登录的 `-client-data-file`），不启用隧道
-
-+ `untrust-device`: 从授信终端中移除当前设备（需要已登录的 `-client-data-file`），不启用隧道
-
-+ `sid`: aTrust SID，调试用途，一般不需要加此参数
-
-+ `device-id`: aTrust 设备 ID，调试用途，一般不需要加此参数
-
-+ `sign-key`: aTrust 签名密钥，调试用途，一般不需要加此参数
-
-+ `resource-file`: aTrust 资源文件，调试用途，一般不需要加此参数
-
-### 计划表
-
-#### 已完成
-
-- [x] 代理 TCP 流量
-- [x] 代理 UDP 流量
-- [x] SOCKS5 代理服务
-- [x] HTTP 代理服务
-- [x] Shadowsocks 代理服务
-- [x] 远端 DNS 解析
-- [x] ZJU 规则添加
-- [x] 支持 IPv6 直连
-- [x] DNS 缓存加速
-- [x] 自动选择线路
-- [x] TCP 端口转发功能
-- [x] UDP 端口转发功能
-- [x] 通过配置文件启动
-- [x] 定时保活
-- [x] TUN 模式
-- [x] 自动劫持 DNS
-- [x] 短信验证
-- [x] TOTP 验证
-- [x] 证书验证
-- [x] aTrust 协议支持
-- [x] Fake IP
-
-#### To Do
-
-### 贡献者
-
-<a href="https://github.com/mythologyli/zju-connect/graphs/contributors">
-  <img src="https://contrib.rocks/image?repo=mythologyli/zju-connect" />
-</a>
-
-### 感谢
-
-+ [EasierConnect](https://github.com/lyc8503/EasierConnect)
-
-+ [socks2http](https://github.com/zenhack/socks2http)
-
-+ [![image](docs/yxvm.png)](https://yxvm.com/)
-
-  [NodeSupport](https://github.com/NodeSeekDev/NodeSupport) 赞助了本项目
-
-### Star History
-
-[![Star History Chart](https://api.star-history.com/image?repos=mythologyli/zju-connect&type=date&legend=top-left)](https://www.star-history.com/?repos=mythologyli%2Fzju-connect&type=date&legend=bottom-right)
+- 直接上游：[Mythologyli/zju-connect](https://github.com/Mythologyli/zju-connect)
+- 原始项目：[lyc8503/EasierConnect](https://github.com/lyc8503/EasierConnect)
+- 源码来源记录：[UPSTREAM.md](UPSTREAM.md)

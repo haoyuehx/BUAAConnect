@@ -23,3 +23,14 @@ go.work
 
 # Config file
 config.toml
+
+# BUAAConnect local binaries, credentials and diagnostic data
+/buaaconnect
+/buaaconnect.exe
+/config.act.toml
+.env
+.env.*
+client_data.json
+*.pcap
+*.pcapng
+*.keylog
