@@ -29,6 +29,14 @@ import (
 	utls "github.com/refraction-networking/utls"
 )
 
+// redactSecret renders a credential for logs without exposing its value.
+func redactSecret(name, value string) string {
+	if value == "" {
+		return name + "=<unset>"
+	}
+	return fmt.Sprintf("%s=<redacted len=%d>", name, len(value))
+}
+
 var errSMSRequired = errors.New("SMS code required")
 var errTOTPRequired = errors.New("TOTP required")
 var errCertRequired = errors.New("cert required")
@@ -93,7 +101,7 @@ func (c *Client) loginAuthAndPsw(graphCodeFile string) error {
 	}
 
 	c.twfID = string(regexp.MustCompile(`<TwfID>(.*)</TwfID>`).FindSubmatch(buf.Bytes())[1])
-	log.Printf("TWFID: %s", c.twfID)
+	log.Printf("%s", redactSecret("TWFID", c.twfID))
 
 	rsaKey := string(regexp.MustCompile(`<RSA_ENCRYPT_KEY>(.*)</RSA_ENCRYPT_KEY>`).FindSubmatch(buf.Bytes())[1])
 	log.Printf("RSA key: %s", rsaKey)
@@ -236,7 +244,7 @@ func (c *Client) loginAuthAndPsw(graphCodeFile string) error {
 	twfIDMatch := regexp.MustCompile(`<TwfID>(.*)</TwfID>`).FindSubmatch(buf.Bytes())
 	if twfIDMatch != nil {
 		c.twfID = string(twfIDMatch[1])
-		log.Printf("Update TWFID: %s", c.twfID)
+		log.Printf("Update %s", redactSecret("TWFID", c.twfID))
 	}
 
 	log.Printf("TWFID has been authorized")
@@ -321,7 +329,7 @@ func (c *Client) loginSMS() error {
 	twfIDMatch := regexp.MustCompile(`<TwfID>(.*)</TwfID>`).FindSubmatch(buf.Bytes())
 	if twfIDMatch != nil {
 		c.twfID = string(twfIDMatch[1])
-		log.Printf("Update TWFID: %s", c.twfID)
+		log.Printf("Update %s", redactSecret("TWFID", c.twfID))
 	}
 	log.Print("SMS code verification success")
 
@@ -458,7 +466,7 @@ func (c *Client) loginCert() error {
 	twfIDMatch := regexp.MustCompile(`<TwfID>(.*)</TwfID>`).FindSubmatch(buf.Bytes())
 	if twfIDMatch != nil {
 		c.twfID = string(twfIDMatch[1])
-		log.Printf("Update TWFID: %s", c.twfID)
+		log.Printf("Update %s", redactSecret("TWFID", c.twfID))
 	}
 
 	if strings.Contains(response, "<pwpErrorCode>16</pwpErrorCode>") {
@@ -633,7 +641,7 @@ func (c *Client) requestToken() error {
 
 	c.token = (*[48]byte)([]byte(sessionID[:31] + "\x00" + c.twfID))
 
-	log.Printf("Token: %s", hex.EncodeToString(c.token[:]))
+	log.Printf("%s", redactSecret("Token", hex.EncodeToString(c.token[:])))
 
 	return nil
 }
@@ -668,7 +676,7 @@ func (c *Client) requestIP() error {
 	}
 
 	log.DebugPrintf("Request IP: wrote %d bytes", n)
-	log.DebugDumpHex(message[:n])
+	// The request contains the session token; never dump it even in debug mode.
 
 	reply := make([]byte, 0x80)
 	n, err = conn.Read(reply)

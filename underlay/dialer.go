@@ -2,10 +2,12 @@ package underlay
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/netip"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -99,6 +101,41 @@ func (d *Dialer) ExcludeIP(ip net.IP) {
 	defer d.mu.Unlock()
 	d.excludedIPs = append(d.excludedIPs, append(net.IP(nil), ip...))
 	d.requireBound = true
+}
+
+// PinInterface resolves and fixes the underlay interface before the TUN
+// device is installed, returning its name. A manually configured interface is
+// returned unchanged. With auto-detection the interface is resolved once
+// (including a UDP probe towards address when the default-interface monitor
+// cannot answer) so later control-plane traffic cannot be captured by the
+// freshly created TUN device. A dialer without auto-detection stays unbound
+// and returns an empty name.
+func (d *Dialer) PinInterface(ctx context.Context, address string) (string, error) {
+	if d == nil {
+		return "", nil
+	}
+	d.mu.RLock()
+	autoDetect := d.autoDetect
+	interfaceName := d.interfaceName
+	d.mu.RUnlock()
+	if !autoDetect || interfaceName != "" {
+		return interfaceName, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	if address == "" {
+		return "", errors.New("underlay interface probe requires a server address")
+	}
+
+	interfaceName = d.ensureInterface(address)
+	if interfaceName == "" {
+		interfaceName = d.refreshInterface()
+	}
+	if interfaceName == "" {
+		return "", fmt.Errorf("no usable underlay interface for %s", address)
+	}
+	return interfaceName, nil
 }
 
 // DialContext connects through the selected underlay interface.
@@ -315,12 +352,51 @@ func detectDefaultInterface() string {
 	return interfaceMonitor.DefaultInterfaceName(netip.IPv4Unspecified())
 }
 
+// virtualUnderlayInterfacePrefixes lists interface names that are normally
+// TUN/point-to-point or proxy TUN devices. Binding the underlay (the transport
+// used to reach the VPN server) to one of them would route VPN traffic back
+// into the VPN tunnel. Explicitly configured bind_interface values bypass this
+// filter; it only applies to auto-detection.
+var virtualUnderlayInterfacePrefixes = []string{
+	"tun",
+	"utun",
+	"meta",
+	"mihomo",
+	"clash",
+	"buaa",
+	"zju-connect",
+}
+
+func isVirtualUnderlayInterfaceName(interfaceName string) bool {
+	name := strings.ToLower(strings.TrimSpace(interfaceName))
+	if name == "" {
+		return false
+	}
+	for _, prefix := range virtualUnderlayInterfacePrefixes {
+		if strings.HasPrefix(name, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// interfaceFlagsUsable rejects interfaces that cannot carry the underlay:
+// down/loopback interfaces and point-to-point links such as tun devices.
+func interfaceFlagsUsable(flags net.Flags) bool {
+	return flags&net.FlagUp != 0 &&
+		flags&net.FlagLoopback == 0 &&
+		flags&net.FlagPointToPoint == 0
+}
+
 func usableInterface(interfaceName string, excludedIPs []net.IP) bool {
 	if interfaceName == "" {
 		return false
 	}
+	if isVirtualUnderlayInterfaceName(interfaceName) {
+		return false
+	}
 	iface, err := net.InterfaceByName(interfaceName)
-	if err != nil || iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
+	if err != nil || !interfaceFlagsUsable(iface.Flags) {
 		return false
 	}
 	if len(excludedIPs) == 0 {

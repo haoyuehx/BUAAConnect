@@ -86,6 +86,35 @@ func (s *Stack) AddDnsServer(dnsServer string, targetHost string) error {
 	return nil
 }
 
+func NewStackWithOptions(vpnClient client.Client, opts Options) (*Stack, error) {
+	return NewStack(vpnClient, opts.DNSHijack, opts.FakeIP, opts.IPResources)
+}
+
+func (s *Stack) InterfaceName() string {
+	if s == nil || s.endpoint == nil {
+		return ""
+	}
+	return s.endpoint.ifceName
+}
+
+func (s *Stack) ClientIP() net.IP {
+	if s == nil || s.endpoint == nil {
+		return nil
+	}
+	return append(net.IP(nil), s.endpoint.ip...)
+}
+
+func (s *Stack) AddedRoutes() []string {
+	return nil
+}
+
+func (s *Stack) Cleanup() error {
+	if s == nil || s.endpoint == nil || s.endpoint.ifce == nil {
+		return nil
+	}
+	return s.endpoint.ifce.Close()
+}
+
 func NewStack(vpnClient client.Client, dnsHijack, fakeIP bool, ipResources []client.IPResource) (*Stack, error) {
 	var err error
 	s := &Stack{}

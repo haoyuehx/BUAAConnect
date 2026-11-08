@@ -16,6 +16,7 @@ import (
 	"github.com/mythologyli/zju-connect/internal/hook_func"
 	"github.com/mythologyli/zju-connect/internal/ippool"
 	"github.com/mythologyli/zju-connect/internal/ipresource"
+	"github.com/mythologyli/zju-connect/internal/netownership"
 	"github.com/mythologyli/zju-connect/internal/zcdns"
 	"github.com/mythologyli/zju-connect/internal/zctcpip"
 	"github.com/mythologyli/zju-connect/log"
@@ -24,6 +25,23 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip/network/ipv4"
 	gvisorstack "gvisor.dev/gvisor/pkg/tcpip/stack"
 )
+
+const DefaultTunNamePrefix = "buaaconnect"
+
+// Options configures the TUN stack. The zero value keeps the historical
+// NewStack behavior except for the new default interface-name prefix.
+type Options struct {
+	TunName     string
+	DNSHijack   bool
+	FakeIP      bool
+	IPResources []client.IPResource
+	ExtraRoutes []string
+	ServerIPs   []net.IP
+	SystemDNS   string
+	DNSDomains  []string
+	RouteRunner netownership.CommandRunner
+	DNSRunner   netownership.CommandRunner
+}
 
 const MTU uint32 = 1400
 const maxInboundPacketSize = 1500
@@ -40,6 +58,50 @@ type Stack struct {
 	resourceCache       *resourceDecisionCache
 	ipPool              *ippool.IPPool[[]client.DomainResource]
 	fakeIP              bool
+
+	routeManager *netownership.RouteManager
+	dnsManager   *netownership.DNSManager
+
+	errInitOnce sync.Once
+	errCh       chan error
+	reportOnce  sync.Once
+
+	cleanupMu   sync.Mutex
+	cleanupDone bool
+	cleanupErr  error
+}
+
+// Err reports the first fatal error that stopped Run. The channel is buffered
+// and never closed, so callers can select on it without racing shutdown.
+func (s *Stack) Err() <-chan error {
+	return s.ensureErrCh()
+}
+
+func (s *Stack) ensureErrCh() chan error {
+	s.errInitOnce.Do(func() {
+		s.errCh = make(chan error, 1)
+	})
+	return s.errCh
+}
+
+// reportError records a fatal Run error instead of panicking, so terminal
+// cleanup hooks are not skipped by a crashed goroutine.
+func (s *Stack) reportError(err error) {
+	if err == nil {
+		return
+	}
+	log.Printf("TUN stack error: %v", err)
+	ch := s.ensureErrCh()
+	s.reportOnce.Do(func() {
+		ch <- err
+	})
+}
+
+var errStackStopped = errors.New("tun stack stopped")
+
+func (s *Stack) fatalError(err error) error {
+	s.reportError(err)
+	return errStackStopped
 }
 
 func (s *Stack) SetupResolve(r zcdns.LocalServer) {
@@ -52,9 +114,9 @@ func (s *Stack) SetupIPPool(ipPool *ippool.IPPool[[]client.DomainResource]) {
 
 func (s *Stack) Run() {
 	if s.endpoint.client.CanUseTCPTunnel() {
-		err := s.CreateTCPListener()
-		if err != nil {
-			panic(err)
+		if err := s.CreateTCPListener(); err != nil {
+			s.reportError(fmt.Errorf("create TCP listener: %w", err))
+			return
 		}
 		s.StartTCPListener()
 	}
@@ -62,7 +124,8 @@ func (s *Stack) Run() {
 	var connErr error
 	s.l3Conn, connErr = s.endpoint.client.NewL3Conn()
 	if connErr != nil {
-		panic(connErr)
+		s.reportError(fmt.Errorf("create L3 connection: %w", connErr))
+		return
 	}
 	defer s.l3Conn.Close()
 
@@ -75,7 +138,8 @@ func (s *Stack) Run() {
 				if hook_func.IsTerminal() {
 					return
 				}
-				panic(err)
+				s.reportError(fmt.Errorf("read from VPN server: %w", err))
+				return
 			}
 			log.DebugPrintf("Recv: read %d bytes", n)
 			log.DebugDumpHex(buf[:n])
@@ -84,10 +148,9 @@ func (s *Stack) Run() {
 			if err != nil {
 				if hook_func.IsTerminal() {
 					return
-				} else {
-					log.Printf("Error occurred while writing to TUN stack: %v", err)
-					panic(err)
 				}
+				s.reportError(fmt.Errorf("write to TUN stack: %w", err))
+				return
 			}
 		}
 	}()
@@ -99,10 +162,9 @@ func (s *Stack) Run() {
 		if err != nil {
 			if hook_func.IsTerminal() {
 				return
-			} else {
-				log.Printf("Error occurred while reading from TUN stack: %v", err)
-				panic(err)
 			}
+			s.reportError(fmt.Errorf("read from TUN stack: %w", err))
+			return
 		}
 
 		if n < zctcpip.IPv4PacketMinLength {
@@ -118,6 +180,9 @@ func (s *Stack) Run() {
 			err = fmt.Errorf("unsupport IP version %d", ipVersion)
 		}
 		if err != nil {
+			if errors.Is(err, errStackStopped) {
+				return
+			}
 			log.DebugPrintf("Error occurred while processing IP packet: %v", err)
 			continue
 		}
@@ -235,7 +300,7 @@ func (s *Stack) processIPV4TCP(packet zctcpip.IPv4Packet, tcpPacket zctcpip.TCPP
 		if errors.Is(err, client.ErrResourceNotFound) {
 			return err
 		}
-		panic(err)
+		return s.fatalError(fmt.Errorf("write packet to VPN server: %w", err))
 	}
 	log.DebugPrintf("Send: wrote %d bytes", n)
 	log.DebugDumpHex(packet[:n])
@@ -255,7 +320,7 @@ func (s *Stack) processIPV4UDP(packet zctcpip.IPv4Packet, udpPacket zctcpip.UDPP
 		if errors.Is(err, client.ErrResourceNotFound) {
 			return err
 		}
-		panic(err)
+		return s.fatalError(fmt.Errorf("write packet to VPN server: %w", err))
 	}
 	log.DebugPrintf("Send: wrote %d bytes", n)
 	log.DebugDumpHex(packet[:n])
@@ -274,7 +339,7 @@ func (s *Stack) processIPV4ICMP(packet zctcpip.IPv4Packet, icmpHeader zctcpip.IC
 		if errors.Is(err, client.ErrResourceNotFound) {
 			return err
 		}
-		panic(err)
+		return s.fatalError(fmt.Errorf("write packet to VPN server: %w", err))
 	}
 	log.DebugPrintf("Send: wrote %d bytes", n)
 	log.DebugDumpHex(packet[:n])

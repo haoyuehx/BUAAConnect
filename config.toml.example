@@ -1,26 +1,46 @@
+# BUAAConnect generic configuration template.
+# Do not commit files containing credentials to version control.
+
+# Profile-based defaults: "school" or "act". When set, the corresponding
+# built-in server address, port, TUN name and proxy binds are used as defaults.
+# profile = "school"
+
 protocol = "easyconnect" # "easyconnect" or "atrust"
-server_address = "rvpn.zju.edu.cn"
+server_address = ""      # e.g. "vpn.buaa.edu.cn" or "vpn.act.buaa.edu.cn"
 server_port = 443
-username = "username"
-password = "password"
-disable_zju_config = false
-disable_remote_dns = false
+username = ""
+password = "" # Prefer BUAA_CONNECT_PASSWORD or interactive prompt; do not commit plaintext.
+
+# TUN / routing
+tun_mode = false
+add_route = false
+tun_name = "buaa-tun"
+extra_routes = [] # e.g. ["10.212.0.0/16", "10.213.1.5"]
+
+# System DNS integration (auto | resolvectl | off)
+system_dns = "auto"
+
+# Lifecycle
+state_dir = ""
+max_reconnect = 5
+reconnect_delay = 3
+
+# Proxy binds
 socks_bind = ":1080"
 socks_user = ""
 socks_passwd = ""
 http_bind = ":1081"
 shadowsocks_url = "" # "ss://aes-128-gcm:password@:1082"
 dial_direct_proxy = "" # "http://127.0.0.1:7890" or "socks://127.0.0.1:7890"
+
 tcp_tunnel_mode = false
-tun_mode = false
-add_route = false
 dns_ttl = 3600
 disable_keep_alive = false
-keep_alive_url = "" # "https://www.cnki.net/favicon.ico"
+keep_alive_url = "" # e.g. "https://www.cnki.net/favicon.ico"
 remote_dns_server = "auto"
 secondary_dns_server = "auto"
 dns_server_bind = ""
-local_dns_server = "" # DNS used to resolve the VPN server, e.g. "223.5.5.5" or "223.5.5.5:53"
+local_dns_server = "" # DNS used to resolve the VPN server hostname, e.g. "223.5.5.5"
 dns_hijack = false
 fake_ip = false
 debug_dump = false
@@ -29,18 +49,18 @@ debug_tls_log_file = "" # Export TLS session secrets in NSS key log format (debu
 bind_interface = ""
 auto_detect_interface = false
 
-# Port forwarding
+# ZJU compatibility is disabled by default to avoid accidentally connecting to
+# ZJU servers. Only set disable_zju_config = false if you explicitly need it.
+disable_zju_config = true
+
+# Port forwarding and custom DNS
 port_forwarding = [
-#    { network_type = "tcp", bind_address = "127.0.0.1:9898", remote_address = "10.10.98.98:80" },
-#    { network_type = "tcp", bind_address = "127.0.0.1:9899", remote_address = "10.10.98.98:80" },
-#    { network_type = "udp", bind_address = "127.0.0.1:1053", remote_address = "10.10.0.21:53" }
+#    { network_type = "tcp", bind_address = "127.0.0.1:9898", remote_address = "10.212.98.98:80" },
 ]
 
 custom_dns = [
-#    { host_name = "appservice.zju.edu.cn", ip = "10.203.8.198"},
-#    { host_name = "www.cc98.org", ip = "10.10.98.98"}
+#    { host_name = "example.buaa.edu.cn", ip = "10.212.8.198"},
 ]
-
 
 # EasyConnect specific settings
 totp_secret = ""
@@ -56,12 +76,11 @@ custom_proxy_domain = [
 ]
 twf_id = ""
 
-
 # aTrust specific settings
 auth_type = "auth/psw"
 login_domain = "Radius"
 client_data_file = "client_data.json"
-graph_code_file = "" # Optional: captcha image will open in browser if this left empty. If set, the program will save the captcha image to this file and ask user to input the code in terminal.
+graph_code_file = "" # Optional: captcha image will open in browser if left empty.
 cas_ticket = ""
 oauth2_code = ""
 phone = ""

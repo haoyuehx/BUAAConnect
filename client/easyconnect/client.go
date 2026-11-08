@@ -46,6 +46,13 @@ type Options struct {
 	UnderlayDialer   client.UnderlayDialer
 	TLSKeyLogWriter  io.Writer
 	ChallengeHandler authchallenge.Handler
+
+	// MaxReconnect bounds the number of consecutive L3 re-handshakes before
+	// Read/Write give up. Values <= 0 select the default (5).
+	MaxReconnect int
+	// ReconnectDelay is the base delay between L3 re-handshakes. It grows
+	// exponentially up to a cap. Values <= 0 select the default (1s).
+	ReconnectDelay time.Duration
 }
 
 type Client struct {
@@ -66,6 +73,9 @@ type Client struct {
 
 	twfID string
 	token *[48]byte
+
+	maxReconnect   int
+	reconnectDelay time.Duration
 
 	lineList []string
 
@@ -114,6 +124,14 @@ func NewClient(options Options) *Client {
 		lifecycleCancel:   lifecycleCancel,
 		graphCodeFile:     options.Auth.GraphCodeFile,
 		challengeHandler:  challengeHandler,
+		maxReconnect:      options.MaxReconnect,
+		reconnectDelay:    options.ReconnectDelay,
+	}
+	if c.maxReconnect <= 0 {
+		c.maxReconnect = defaultL3ReconnectLimit
+	}
+	if c.reconnectDelay <= 0 {
+		c.reconnectDelay = defaultL3ReconnectDelay
 	}
 	c.setHTTPTransport(&tls.Config{InsecureSkipVerify: true})
 	return c
@@ -193,10 +211,61 @@ func (c *Client) CanUseTCPTunnel() bool {
 	return c.tcpTunnelOnly
 }
 
+// ServerHost returns the VPN server host:port currently in use. When
+// multi-line probing selected a different line, this is the line actually
+// connected to. The value is stable once Setup returned.
+func (c *Client) ServerHost() string {
+	if c == nil {
+		return ""
+	}
+	return c.server
+}
+
+// underlayInterfacePinner is an optional capability of client.UnderlayDialer
+// implementations (for example underlay.Dialer) that can resolve and pin the
+// physical uplink before the TUN device is installed.
+type underlayInterfacePinner interface {
+	PinInterface(ctx context.Context, address string) (string, error)
+}
+
+// pinUnderlayInterface fixes the physical uplink before the TUN interface can
+// capture control-plane traffic. Auto-detection happens on the first dial, but
+// by then the update_session keepalive may already be routed into the VPN
+// tunnel if no dial happened before the TUN device appeared. Dialers that
+// cannot pin an interface (or are explicitly unbound) are left untouched.
+func (c *Client) pinUnderlayInterface() {
+	pinner, ok := c.underlayDialer.(underlayInterfacePinner)
+	if !ok {
+		return
+	}
+	address := c.underlayProbeAddress()
+	interfaceName, err := pinner.PinInterface(c.lifecycleCtx, address)
+	if err != nil {
+		log.Printf("Warning: failed to pin underlay interface before setup: %v", err)
+		return
+	}
+	if interfaceName != "" {
+		log.Printf("Underlay interface pinned before setup: %s", interfaceName)
+	}
+}
+
+// underlayProbeAddress renders the configured server as host:port so the
+// underlay dialer can probe the route that will carry VPN traffic.
+func (c *Client) underlayProbeAddress() string {
+	if c.server == "" {
+		return ""
+	}
+	if _, _, err := net.SplitHostPort(c.server); err == nil {
+		return c.server
+	}
+	return net.JoinHostPort(c.server, "443")
+}
+
 func (c *Client) Setup() error {
 	if c.underlayDialer == nil {
 		return errors.New("underlay dialer is required")
 	}
+	c.pinUnderlayInterface()
 	if err := c.ensureSession(); err != nil {
 		return err
 	}

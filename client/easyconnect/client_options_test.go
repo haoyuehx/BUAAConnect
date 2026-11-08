@@ -5,6 +5,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mythologyli/zju-connect/client/authchallenge"
 	"github.com/mythologyli/zju-connect/underlay"
@@ -54,6 +55,69 @@ func TestNewClientMapsOptions(t *testing.T) {
 	}
 	if reflect.TypeOf(c.challengeHandler) != reflect.TypeOf(challengeHandler) {
 		t.Fatalf("challenge handler type = %T, want %T", c.challengeHandler, challengeHandler)
+	}
+}
+
+func TestNewClientMapsReconnectOptions(t *testing.T) {
+	client := NewClient(Options{
+		Server:         "vpn.example.com:443",
+		MaxReconnect:   3,
+		ReconnectDelay: 250 * time.Millisecond,
+	})
+	t.Cleanup(client.Close)
+
+	if client.maxReconnect != 3 {
+		t.Fatalf("maxReconnect = %d, want 3", client.maxReconnect)
+	}
+	if client.reconnectDelay != 250*time.Millisecond {
+		t.Fatalf("reconnectDelay = %s, want 250ms", client.reconnectDelay)
+	}
+}
+
+func TestNewClientReconnectDefaults(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		max       int
+		delay     time.Duration
+		wantMax   int
+		wantDelay time.Duration
+	}{
+		{name: "zero values", wantMax: defaultL3ReconnectLimit, wantDelay: defaultL3ReconnectDelay},
+		{
+			name:      "negative values",
+			max:       -2,
+			delay:     -time.Second,
+			wantMax:   defaultL3ReconnectLimit,
+			wantDelay: defaultL3ReconnectDelay,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			client := NewClient(Options{MaxReconnect: tt.max, ReconnectDelay: tt.delay})
+			t.Cleanup(client.Close)
+			if client.maxReconnect != tt.wantMax || client.reconnectDelay != tt.wantDelay {
+				t.Fatalf("reconnect policy = (%d, %s), want (%d, %s)",
+					client.maxReconnect, client.reconnectDelay, tt.wantMax, tt.wantDelay)
+			}
+		})
+	}
+}
+
+func TestServerHostReturnsSelectedLine(t *testing.T) {
+	client := NewClient(Options{Server: "line-a.example.com:443"})
+	t.Cleanup(client.Close)
+	if got := client.ServerHost(); got != "line-a.example.com:443" {
+		t.Fatalf("ServerHost() = %q, want %q", got, "line-a.example.com:443")
+	}
+
+	// Multi-line probing replaces the initial server with the best line.
+	client.server = "line-b.example.com:443"
+	if got := client.ServerHost(); got != "line-b.example.com:443" {
+		t.Fatalf("ServerHost() after line selection = %q, want %q", got, "line-b.example.com:443")
+	}
+
+	var nilClient *Client
+	if got := nilClient.ServerHost(); got != "" {
+		t.Fatalf("nil ServerHost() = %q, want empty", got)
 	}
 }
 

@@ -28,9 +28,11 @@ config.toml
 /buaaconnect
 /buaaconnect.exe
 /config.act.toml
+/config.school.toml
 .env
 .env.*
 client_data.json
 *.pcap
 *.pcapng
 *.keylog
+/.pi/

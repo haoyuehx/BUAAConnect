@@ -1,0 +1,31 @@
+# BUAAConnect school profile configuration.
+# Do not commit files containing credentials to version control.
+
+profile = "school"
+protocol = "easyconnect"
+server_address = "vpn.buaa.edu.cn"
+server_port = 443
+username = ""
+# Prefer BUAA_CONNECT_PASSWORD or interactive prompt; do not commit plaintext.
+password = ""
+
+disable_zju_config = true
+skip_domain_resource = false
+remote_dns_server = "auto"
+
+socks_bind = "127.0.0.1:11080"
+http_bind = "127.0.0.1:11081"
+tun_mode = true
+add_route = true
+tun_name = "buaa-school"
+extra_routes = []
+
+system_dns = "auto"
+state_dir = ""
+max_reconnect = 5
+reconnect_delay = 3
+
+# Add authorized forwarding rules here.
+port_forwarding = []
+
+custom_dns = []

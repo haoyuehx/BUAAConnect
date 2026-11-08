@@ -36,6 +36,13 @@ type ClientOptions struct {
 	Session         SessionOptions
 	UnderlayDialer  client.UnderlayDialer
 	TLSKeyLogWriter io.Writer
+	// MaxReconnect bounds the consecutive L3 tunnel reconnect attempts. A
+	// value <= 0 keeps retrying forever (historical behaviour); SetupOptions
+	// may override it.
+	MaxReconnect int
+	// ReconnectDelay is the base delay between L3 tunnel reconnect attempts
+	// (exponential backoff). A value <= 0 uses the default interval.
+	ReconnectDelay time.Duration
 }
 
 type SetupOptions struct {
@@ -49,6 +56,10 @@ type SetupOptions struct {
 	ChallengeHandler         authchallenge.Handler
 	SessionRefreshInterval   time.Duration
 	SaveClientData           func([]byte) error
+	// MaxReconnect overrides ClientOptions.MaxReconnect when > 0.
+	MaxReconnect int
+	// ReconnectDelay overrides ClientOptions.ReconnectDelay when > 0.
+	ReconnectDelay time.Duration
 }
 
 type Client struct {
@@ -86,6 +97,9 @@ type Client struct {
 	l3Tunnel   *L3Tunnel
 	l3TunnelMu sync.Mutex
 
+	maxReconnect   int
+	reconnectDelay time.Duration
+
 	lifecycleCtx     context.Context
 	lifecycleCancel  context.CancelFunc
 	closeOnce        sync.Once
@@ -104,8 +118,40 @@ func NewClient(options ClientOptions) *Client {
 		SignKey:         options.Session.SignKey,
 		underlayDialer:  options.UnderlayDialer,
 		tlsKeyLogWriter: options.TLSKeyLogWriter,
+		maxReconnect:    options.MaxReconnect,
+		reconnectDelay:  options.ReconnectDelay,
 		lifecycleCtx:    lifecycleCtx,
 		lifecycleCancel: lifecycleCancel,
+	}
+}
+
+// redactSecret renders a credential for logs without exposing its value.
+func redactSecret(name, value string) string {
+	if value == "" {
+		return name + "=<unset>"
+	}
+	return fmt.Sprintf("%s=<redacted len=%d>", name, len(value))
+}
+
+// describeClientAuthData summarizes persisted auth data without leaking
+// session cookies (which are bearer credentials).
+func describeClientAuthData(data auth.ClientAuthData) string {
+	return fmt.Sprintf("{DeviceID:%s, MACAddresses:%d, Cookies:%d, ServerVersionInfo:%d bytes}",
+		redactSecret("DeviceID", data.DeviceID), len(data.MACAddresses), len(data.Cookies), len(data.ServerVersionInfo))
+}
+
+// newSetupSessionContext creates the control-plane session context. It is
+// rooted in the client lifecycle so background refresh survives Setup, while
+// still mirroring caller cancellation until finishSession is called. On a
+// failed setup finishSession(false) also cancels the session.
+func (c *Client) newSetupSessionContext(ctx context.Context) (context.Context, func(success bool)) {
+	sessionCtx, cancelSession := context.WithCancel(c.lifecycleCtx)
+	stopSetupCancellation := context.AfterFunc(ctx, cancelSession)
+	return sessionCtx, func(success bool) {
+		stopSetupCancellation()
+		if !success {
+			cancelSession()
+		}
 	}
 }
 
@@ -266,7 +312,7 @@ func SetTrusted(serverAddress string, serverPort int, authData []byte, trusted b
 			return err
 		}
 	}
-	log.DebugPrintf("Given auth data: %+v", clientAuthData)
+	log.DebugPrintf("Given auth data: %s", describeClientAuthData(clientAuthData))
 
 	if clientAuthData.DeviceID == "" {
 		clientAuthData.DeviceID = strings.ToLower(randHex(32))
@@ -326,22 +372,45 @@ func SetTrusted(serverAddress string, serverPort int, authData []byte, trusted b
 	}
 }
 
+// ServerHost returns the aTrust server address configured by Setup.
+func (c *Client) ServerHost() string {
+	if c == nil {
+		return ""
+	}
+	return c.serverAddress
+}
+
+// applyReconnectOptions lets SetupOptions override the reconnect policy
+// supplied through ClientOptions. Zero values keep the client defaults.
+func (c *Client) applyReconnectOptions(options SetupOptions) {
+	if options.MaxReconnect > 0 {
+		c.maxReconnect = options.MaxReconnect
+	}
+	if options.ReconnectDelay > 0 {
+		c.reconnectDelay = options.ReconnectDelay
+	}
+}
+
 func (c *Client) Setup(options SetupOptions) ([]byte, error) {
 	return c.SetupContext(context.Background(), options)
 }
 
-func (c *Client) SetupContext(ctx context.Context, options SetupOptions) ([]byte, error) {
-	setupCtx, cancelSetup := context.WithCancel(ctx)
-	defer cancelSetup()
-	stopLifecycleCancellation := context.AfterFunc(c.lifecycleCtx, cancelSetup)
-	defer stopLifecycleCancellation()
-	if err := setupCtx.Err(); err != nil {
+func (c *Client) SetupContext(ctx context.Context, options SetupOptions) (_ []byte, retErr error) {
+	// The control-plane session outlives Setup: background token refresh keeps
+	// using it. It must therefore belong to the client lifecycle, not to the
+	// caller's setup context. While Setup is running we still forward caller
+	// cancellation (and lifecycle cancellation via the parent context) to it;
+	// after a successful setup the forwarding is stopped.
+	sessionCtx, finishSession := c.newSetupSessionContext(ctx)
+	defer func() { finishSession(retErr == nil) }()
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	if c.underlayDialer == nil {
 		return nil, errors.New("underlay dialer is required")
 	}
 	c.serverAddress = options.ServerAddress
+	c.applyReconnectOptions(options)
 
 	var clientAuthData auth.ClientAuthData
 	if options.ClientData != nil {
@@ -350,7 +419,7 @@ func (c *Client) SetupContext(ctx context.Context, options SetupOptions) ([]byte
 			return nil, err
 		}
 	}
-	log.DebugPrintf("Given auth data: %+v", clientAuthData)
+	log.DebugPrintf("Given auth data: %s", describeClientAuthData(clientAuthData))
 	if clientAuthData.DeviceID == "" && c.DeviceID != "" {
 		clientAuthData.DeviceID = c.DeviceID
 	}
@@ -364,7 +433,7 @@ func (c *Client) SetupContext(ctx context.Context, options SetupOptions) ([]byte
 	} else {
 		authServerHost = fmt.Sprintf("%s:%d", options.ServerAddress, options.ServerPort)
 	}
-	sess := auth.NewSessionContext(setupCtx, authServerHost, c.tlsKeyLogWriter, c.underlayDialer.DialContext)
+	sess := auth.NewSessionContext(sessionCtx, authServerHost, c.tlsKeyLogWriter, c.underlayDialer.DialContext)
 	serverVersionInfo, manifestErr := sess.ServerVersionInfo()
 	serverVersionInfo, err := resolveServerVersionInfo(clientAuthData.ServerVersionInfo, serverVersionInfo, manifestErr)
 	if err != nil {
@@ -443,20 +512,24 @@ func (c *Client) SetupContext(ctx context.Context, options SetupOptions) ([]byte
 		return nil, err
 	}
 
-	log.DebugPrintf("SID: %s, DeviceID: %s, ConnectionID: %s, SignKey: %s", c.SID, c.DeviceID, c.ConnectionID, c.SignKey)
+	log.DebugPrintf("%s, %s, %s, %s",
+		redactSecret("SID", c.SID),
+		redactSecret("DeviceID", c.DeviceID),
+		redactSecret("ConnectionID", c.ConnectionID),
+		redactSecret("SignKey", c.SignKey))
 
-	c.BestNodes = getBestNodes(setupCtx, c.NodeGroups, c.underlayDialer.DialContext, c.tlsKeyLogWriter)
-	if err := setupCtx.Err(); err != nil {
+	c.BestNodes = getBestNodes(ctx, c.NodeGroups, c.underlayDialer.DialContext, c.tlsKeyLogWriter)
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 
-	err = c.getIP(setupCtx)
+	err = c.getIP(ctx)
 	if err != nil {
 		return nil, err
 	}
 	c.underlayDialer.ExcludeIP(c.ip)
 
-	if err := setupCtx.Err(); err != nil {
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	l3Tunnel, err := NewL3Tunnel(c)

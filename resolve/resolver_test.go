@@ -357,3 +357,32 @@ func failingNetResolver() *net.Resolver {
 		},
 	}
 }
+
+func TestResolverCloseIsIdempotent(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	resolver := &Resolver{
+		resolutions: map[string]*sharedResolution{
+			"example.com": {ctx: ctx, cancel: cancel, done: make(chan struct{})},
+		},
+	}
+	resolver.activeResolutions.Store(1)
+
+	resolver.Close()
+	if !resolver.resolutionClosed {
+		t.Fatal("Close() did not mark the resolver closed")
+	}
+	if len(resolver.resolutions) != 0 {
+		t.Fatalf("Close() left %d resolutions, want 0", len(resolver.resolutions))
+	}
+	select {
+	case <-ctx.Done():
+	case <-time.After(time.Second):
+		t.Fatal("Close() did not cancel the outstanding resolution")
+	}
+
+	// A second call must neither panic nor block (sync.Once is not reusable
+	// after a panic, so this also protects shutdown hooks).
+	resolver.Close()
+	resolver.Close()
+}
